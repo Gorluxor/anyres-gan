@@ -23,4 +23,6 @@ web/
 *.m4v
 *.pkl
 
-
+output/*
+outputs/*
+sh/*

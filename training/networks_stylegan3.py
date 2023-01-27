@@ -166,6 +166,23 @@ class MappingNetwork(torch.nn.Module):
         return f'z_dim={self.z_dim:d}, c_dim={self.c_dim:d}, w_dim={self.w_dim:d}, num_ws={self.num_ws:d}'
 
 #----------------------------------------------------------------------------
+@persistence.persistent_class
+class MappingNetworkZero(torch.nn.Module):
+    def __init__(self, z_dim, c_dim, w_dim, num_ws):
+        super().__init__()
+        self.z_dim = z_dim
+        self.c_dim = c_dim
+        self.w_dim = w_dim
+        self.num_ws = num_ws
+
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False):
+        # Return a tensor of zeros with the correct dimensions
+        return torch.zeros((z.shape[0], self.num_ws, self.w_dim)).to(z.device)
+
+    def extra_repr(self):
+        return f'z_dim={self.z_dim:d}, c_dim={self.c_dim:d}, w_dim={self.w_dim:d}, num_ws={self.num_ws:d}'
+
+
 
 @persistence.persistent_class
 class SynthesisInput(torch.nn.Module):
@@ -474,6 +491,7 @@ class SynthesisLayer(torch.nn.Module):
             assert(scale is not None)
             styles_scale = self.scale_affine(scale)
             styles = styles + styles_scale # equivalent to concatenation
+            # styles = styles + torch.zeros_like(styles_scale) * styles_scale # equivalent to concatenation
 
         if self.is_torgb:
             weight_gain = 1 / np.sqrt(self.in_channels * (self.conv_kernel ** 2))
@@ -677,7 +695,8 @@ class Generator(torch.nn.Module):
             else:
                 assert(False)
             self.scale_mapping = MappingNetwork(z_dim=scale_in_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
-
+            # self.scale_mapping = MappingNetworkZero(z_dim=scale_in_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws)
+            # print(f"Scale Mapping Network Zero is used: {mapping_kwargs=}")
 
     def forward(self, z, c, transform=None, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
