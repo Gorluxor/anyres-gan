@@ -79,6 +79,37 @@ def report_metric(result_dict, run_dir=None, snapshot_pkl=None):
         with open(os.path.join(run_dir, f'metric-{metric}.jsonl'), 'at') as f:
             f.write(jsonl_line + '\n')
 
+#dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank, device=device) # patch_kwargs = patch_kwargs added
+@torch.no_grad()
+def pfid(opts, minX, maxY, target_resolution=1024, num=50000, mode='patch'):
+    assert mode == 'patch' or mode == 'subpatch'  
+    with torch.no_grad():
+        dataset_kwargs = opts.patch_kwargs
+        patch_size = target_resolution #  int(util.remove_prefix(metric.split('-')[1], 'patch'))
+        
+        assert(patch_size == dataset_kwargs.resolution)
+        
+        size_min = minX
+        size_max = maxY
+        scale_min = patch_size / size_max if size_max > 0 else None
+        scale_max = patch_size / size_min
+        # adjust dataset kwargs using desired scale min and max
+        dataset_kwargs.scale_min = scale_min
+        dataset_kwargs.scale_max = scale_max
+        dataset_kwargs.scale_anneal = -1
+        
+        # print("Patch size %d, size_min: %d size_max: %d scale_min: %s scale_max %f"
+        #         % (patch_size, size_min, size_max, str(scale_min), scale_max))
+        
+        target_resolution = opts.G.init_kwargs.img_resolution
+        opts = metric_utils.MetricOptions(G=opts.G, dataset_kwargs=dataset_kwargs,
+                                            num_gpus=1, rank=0)
+        fid = frechet_inception_distance.compute_fid_patch(
+            opts, target_resolution, num, num, mode=mode)
+        # np.savez(os.path.join(output_folder, metric + '.npz'), value=fid)
+        # save_metric(output_folder, metric, fid)
+    return fid
+
 #----------------------------------------------------------------------------
 # Recommended metrics.
 
@@ -95,8 +126,17 @@ def fid2k_full(opts):
     return dict(fid2k_full=fid)
 
 @register_metric
-def pfid2k(opts):
-    pass #TODO: implement from custom_metrics.py and metric_utils.py
+def pfid2k(opts): # maybe different values for minX, maxY?
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    print('{} Available memory: {}'.format(opts.device, torch.cuda.get_device_properties(opts.device).total_memory))
+    fid = pfid(opts, minX=256, maxY=1024, target_resolution=1024, num=2000, mode='patch')
+    return dict(pfid2k=fid)
+
+@register_metric
+def pfid2k_subpatch(opts): # maybe different values for minX, maxY?
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fid = pfid(opts, minX=256, maxY=1024, target_resolution=1024, num=2000, mode='subpatch')
+    return dict(pfid2k_subpatch=fid)
 
 
 @register_metric
