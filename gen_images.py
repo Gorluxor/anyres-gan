@@ -24,6 +24,7 @@ import legacy
 
 def parse_range(s: Union[str, List]) -> List[int]:
     '''Parse a comma separated list of numbers or ranges and return a list of ints.
+
     Example: '1,2,5-10' returns [1, 2, 5, 6, 7]
     '''
     if isinstance(s, list): return s
@@ -87,6 +88,7 @@ def generate_images(
 ):
     """Generate images using pretrained network pickle.
     Examples:
+    Default: python gen_images.py --network ./pretrained/stylegan3-r-ffhq-1024x1024.pkl --seeds 0-15 --outdir outputs
     \b
     # Generate an image using pre-trained AFHQv2 model ("Ours" in Figure 1, left).
     python gen_images.py --outdir=out --trunc=1 --seeds=2 \\
@@ -101,6 +103,27 @@ def generate_images(
     device = torch.device('cuda')
     with dnnlib.util.open_url(network_pkl) as f:
         G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+    from training.networks_stylegan3 import Generator
+    G_new = Generator(
+        c_dim=0,
+        img_resolution=1024 * 4,
+        img_channels=3,
+        z_dim=512,
+        w_dim=512,
+        mapping_kwargs=dnnlib.EasyDict(num_layers=2),
+        magnitude_ema_beta=0.5 ** (64 / (20 * 1e3)),
+        conv_kernel = 1,
+        channel_base = 32768 * 2,
+        channel_max = 1024,
+        use_radial_filters = True,
+    ).to(device)
+    new_dict = {k: v for k, v in G.state_dict().items() if G_new.state_dict()[k].shape == v.shape}
+    #print(new_dict.keys())
+    missing_keys, unexpected_keys  = G_new.load_state_dict(new_dict, strict=False)
+    # import sys
+    # sys.exit()
+    G = G_new
+    print('realoaded the weights')
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -127,8 +150,10 @@ def generate_images(
             m = np.linalg.inv(m)
             G.synthesis.input.transform.copy_(torch.from_numpy(m))
 
+        torch.set_grad_enabled(False)
         img = G(z, label, truncation_psi=truncation_psi, noise_mode=noise_mode)
         img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+        print(img.shape)
         PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
 
 
