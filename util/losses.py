@@ -3,10 +3,12 @@ import torch.nn as nn
 import lpips
 import torch.nn.functional as F
 
+ALIGN_CORNERS_DISABLE_WARNING = False
+
 def adaptive_downsample256(img, mode='bilinear'):
     img = img.clamp(-1, 1)
     if img.shape[-1] > 256:
-        return F.interpolate(img, size=(256, 256), mode=mode)
+        return F.interpolate(img, size=(256, 256), mode=mode, align_corners=None if mode=='nearest' else ALIGN_CORNERS_DISABLE_WARNING)
     else:
         return img
 
