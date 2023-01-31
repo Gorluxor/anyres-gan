@@ -345,7 +345,8 @@ def compute_feature_stats_for_dataset_patch(opts, detector_url, detector_kwargs,
 
         # Load.
         if flag:
-            print("loaded from cache: %s" % cache_tag)
+            if opts.num_gpus == 1:
+                print("loaded from cache: %s" % cache_tag)
             return FeatureStats.load(cache_file)
 
     # Initialize.
@@ -428,7 +429,8 @@ def compute_feature_stats_for_dataset_full(opts, detector_url, detector_kwargs, 
             flag = (float(flag.cpu()) != 0)
         # Load.
         if flag:
-            print("loaded from cache: %s" % cache_tag)
+            if opts.num_gpus == 1:
+                print("loaded from cache: %s" % cache_tag)
             return FeatureStats.load(cache_file)
 
     # Initialize.
@@ -557,8 +559,8 @@ def compute_feature_stats_for_generator_up(opts, detector_url, detector_kwargs, 
 # generates individual patches for pFID
 def compute_feature_stats_for_generator_patch(opts, transformations, detector_url, detector_kwargs,
                                               is_subpatch=False, rel_lo=0, rel_hi=1, batch_size=64, batch_gen=None, **stats_kwargs):
-    assert(opts.num_gpus == 1)
-    assert(opts.rank == 0)
+    # assert(opts.num_gpus == 1)
+    # assert(opts.rank == 0)
     if batch_gen is None:
         batch_gen = min(batch_size, 4)
     assert batch_size % batch_gen == 0
@@ -574,12 +576,14 @@ def compute_feature_stats_for_generator_patch(opts, transformations, detector_ur
     detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
     assert(opts.G_kwargs == {}) # sanity check
 
-    counter = 0
-
     # Main loop.
-    num_batches = math.ceil(stats.max_items / batch_size)
+    num_batches_total = math.ceil(stats.max_items / batch_size)
     assert(transformations.shape[0] % batch_gen == 0)
-    for _ in tqdm(range(num_batches)):
+    num_batches = num_batches_total // opts.num_gpus
+    counter_limit = stats.max_items // opts.num_gpus
+    counter = opts.rank * counter_limit 
+    gpu_counter = 0    
+    for _ in tqdm(range(num_batches), disable=True if opts.num_gpus > 1 else False):
         images = []
         for _i in range(batch_size // batch_gen):
             z = torch.randn([batch_gen, G.z_dim], device=opts.device)
@@ -588,6 +592,8 @@ def compute_feature_stats_for_generator_patch(opts, transformations, detector_ur
                 assert(counter == transformations.shape[0])
                 # no more transformations to use
                 break
+            if counter + batch_gen > counter_limit * (opts.rank + 1):
+                break # no more work for this GPU
             transform = transformations[counter:counter+batch_gen]
             transform = transform.to(opts.device)
             counter += batch_gen
@@ -613,11 +619,18 @@ def compute_feature_stats_for_generator_patch(opts, transformations, detector_ur
         if images.shape[1] == 1:
             images = images.repeat([1, 3, 1, 1])
         features = detector(images, **detector_kwargs)
+        gpu_counter += features.shape[0]
         stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
         progress.update(stats.num_items)
         if stats.is_full():
             break
-    assert(stats.is_full())
-    assert(counter == stats.max_items)
+    if opts.num_gpus > 1:
+        torch.distributed.barrier()
+    # make sure stats is synchronized across all gpus
+    # if stats.num_items <= stats.max_items:
+    #     print(f"gpu: {opts.rank}, stats.num_items = {stats.num_items}, stats.max_items = {stats.max_items}, {gpu_counter=}")
+    #     torch.distributed.barrier()
+    assert(stats.is_full()), f"stats.is_full() is {stats.num_items}"
+    assert(stats.num_items == stats.max_items), f"counter is {counter}, stats.max_items is {stats.max_items}"
     return stats
 
