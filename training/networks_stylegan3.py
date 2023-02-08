@@ -224,7 +224,6 @@ class SynthesisInput(torch.nn.Module):
         # Transform frequencies.
         phases = phases + (freqs @ transforms[:, :2, 2:]).squeeze(2)
         freqs = freqs @ transforms[:, :2, :2]
-
         # Dampen out-of-band frequencies that may occur due to the user-specified transform.
         amplitudes = (1 - (freqs.norm(dim=2) - self.bandwidth) / (self.sampling_rate / 2 - self.bandwidth)).clamp(0, 1)
 
@@ -234,20 +233,55 @@ class SynthesisInput(torch.nn.Module):
         theta[1, 1] = 0.5 * self.size[1] / self.sampling_rate
         grids = torch.nn.functional.affine_grid(theta.unsqueeze(0), [1, 1, self.size[1], self.size[0]], align_corners=False)
 
+        # print(f'{grids.shape=} | {transforms.shape=}') # Added, checking if continues grid sampling would work?
+        # grids = grids[:, :18, :18, :].permute(0, 3, 1, 2) # [batch, channel, height, width]
+        # interpolate with torch functional
+        # grids = torch.nn.functional.interpolate(grids, scale_factor=2, mode='bilinear', align_corners=False).permute(0, 2, 3, 1) # [batch, height, width, channel]
         # Compute Fourier features.
         x = (grids.unsqueeze(3) @ freqs.permute(0, 2, 1).unsqueeze(1).unsqueeze(2)).squeeze(3) # [batch, height, width, channel]
         x = x + phases.unsqueeze(1).unsqueeze(2)
         x = torch.sin(x * (np.pi * 2))
+        # print(f"{x.shape=} * {amplitudes.shape=}")
         x = x * amplitudes.unsqueeze(1).unsqueeze(2)
 
         # Apply trainable mapping.
         weight = self.weight / np.sqrt(self.channels)
+        # print(f"{x.shape=} @ {weight.t().shape=}")
+        # only on first and second dim
+        
         x = x @ weight.t()
+        # print(f"{x.shape=} after @")
+        
 
         # Ensure correct shape.
         x = x.permute(0, 3, 1, 2) # [batch, channel, height, width]
-        misc.assert_shape(x, [w.shape[0], self.channels, int(self.size[1]), int(self.size[0])])
+        # print(f"{x.shape=}")
+        
+        #misc.assert_shape(x, [w.shape[0], self.channels, int(self.size[1]), int(self.size[0])])
         return x
+    def reconfigure_network(self, size=None, sampling_rate=None, bandwidth=None):
+        """ Reconfigure the network for a different output size, sampling rate, or bandwidth.
+
+        Args:
+            size (_type_, optional): _description_. Defaults to None.
+            sampling_rate (_type_, optional): _description_. Defaults to None.
+            bandwidth (_type_, optional): _description_. Defaults to None.
+        """        
+        if size is not None:
+            self.size = np.broadcast_to(np.asarray(size), [2])
+        if sampling_rate is not None:
+            self.sampling_rate = sampling_rate
+        if bandwidth is not None:
+            self.bandwidth = bandwidth
+
+            # Draw random frequencies from uniform 2D disc.
+            freqs = torch.randn([self.channels, 2])
+            radii = freqs.square().sum(dim=1, keepdim=True).sqrt()
+            freqs /= radii * radii.square().exp().pow(0.25)
+            freqs *= bandwidth
+            phases = torch.rand([self.channels]) - 0.5
+            self.freqs.copy_(freqs)
+            self.phases.copy_(phases)
 
     def extra_repr(self):
         return '\n'.join([
@@ -402,6 +436,9 @@ class SynthesisLayer(torch.nn.Module):
         use_scale_affine = False
     ):
         super().__init__()
+        self.lrelu_upsampling = lrelu_upsampling # added so recofig can be used
+        self.filter_size = filter_size # added so recofig can be used
+        self.use_radial_filters = use_radial_filters # added so recofig can be used
         self.w_dim = w_dim
         self.is_torgb = is_torgb
         self.is_critically_sampled = is_critically_sampled
@@ -455,10 +492,48 @@ class SynthesisLayer(torch.nn.Module):
         if self.use_scale_affine:
             self.scale_affine = FullyConnectedLayer(self.w_dim, self.in_channels, bias_init=0)
 
+    def reconfigure_network(self, in_size, out_size, in_sampling_rate, out_sampling_rate, in_half_width, out_half_width, use_fp16):
+        device = self.weight.device
+        self.use_fp16 = use_fp16
+        self.in_size = np.broadcast_to(np.asarray(in_size), [2])
+        self.out_size = np.broadcast_to(np.asarray(out_size), [2])
+        self.in_sampling_rate = in_sampling_rate
+        self.out_sampling_rate = out_sampling_rate
+        self.tmp_sampling_rate = max(in_sampling_rate, out_sampling_rate) * (1 if self.is_torgb else self.lrelu_upsampling)
+
+        self.in_half_width = in_half_width
+        self.out_half_width = out_half_width
+
+        # Design upsampling filter.
+        self.up_factor = int(np.rint(self.tmp_sampling_rate / self.in_sampling_rate))
+        assert self.in_sampling_rate * self.up_factor == self.tmp_sampling_rate
+        self.up_taps = self.filter_size * self.up_factor if self.up_factor > 1 and not self.is_torgb else 1
+        # print(f"{self.up_taps=}, {self.in_cutoff=}, {self.in_half_width=}, {self.tmp_sampling_rate=}")
+        self.down_radial = self.use_radial_filters and not self.is_critically_sampled
+        lowpass_filter = self.design_lowpass_filter(numtaps=self.up_taps, cutoff=self.in_cutoff, width=self.in_half_width*2, fs=self.tmp_sampling_rate)
+        self.register_buffer('up_filter', lowpass_filter.to(device) if lowpass_filter is not None else lowpass_filter) # last one is None (identity)
+        
+        # Design downsampling filter.
+        self.down_factor = int(np.rint(self.tmp_sampling_rate / self.out_sampling_rate))
+        assert self.out_sampling_rate * self.down_factor == self.tmp_sampling_rate
+        self.down_taps = self.filter_size * self.down_factor if self.down_factor > 1 and not self.is_torgb else 1
+        # self.down_radial = use_radial_filters and not self.is_critically_sampled # TODO: think do we need to change it? probably not
+        lowpass_filter = self.design_lowpass_filter(
+            numtaps=self.down_taps, cutoff=self.out_cutoff, width=self.out_half_width*2, fs=self.tmp_sampling_rate, radial=self.down_radial)
+        self.register_buffer("down_filter", lowpass_filter.to(device) if lowpass_filter is not None else lowpass_filter) # last one is None (identity)
+
+        # Compute padding.
+        pad_total = (self.out_size - 1) * self.down_factor + 1
+        pad_total -= (self.in_size + self.conv_kernel - 1) * self.up_factor
+        pad_total += self.up_taps + self.down_taps - 2
+        pad_lo = (pad_total + self.up_factor) // 2
+        pad_hi = pad_total - pad_lo
+        self.padding = [int(pad_lo[0]), int(pad_hi[0]), int(pad_lo[1]), int(pad_hi[1])]
+
     def forward(self, x, w, scale=None, noise_mode='random', force_fp32=False, update_emas=False):
         assert noise_mode in ['random', 'const', 'none'] # unused
-        misc.assert_shape(x, [None, self.in_channels, int(self.in_size[1]), int(self.in_size[0])])
-        misc.assert_shape(w, [x.shape[0], self.w_dim])
+        #misc.assert_shape(x, [None, self.in_channels, int(self.in_size[1]), int(self.in_size[0])])
+        #misc.assert_shape(w, [x.shape[0], self.w_dim])
 
         # Track input magnitude.
         if update_emas:
@@ -491,7 +566,7 @@ class SynthesisLayer(torch.nn.Module):
             up=self.up_factor, down=self.down_factor, padding=self.padding, gain=gain, slope=slope, clamp=self.conv_clamp)
 
         # Ensure correct shape and dtype.
-        misc.assert_shape(x, [None, self.out_channels, int(self.out_size[1]), int(self.out_size[0])])
+        # misc.assert_shape(x, [None, self.out_channels, int(self.out_size[1]), int(self.out_size[0])])
         assert x.dtype == dtype
         return x
 
@@ -548,6 +623,7 @@ class SynthesisNetwork(torch.nn.Module):
         num_fp16_res        = 4,        # Use FP16 for the N highest resolutions.
         training_mode       = 'global', # training mode for input layer
         fov                 = None,     # Specify FOV for 360 model
+        actual_resolution   = 1024,     # Specify actual resolution for size calculation
         **layer_kwargs,                 # Arguments for SynthesisLayer.
     ):
         super().__init__()
@@ -576,6 +652,9 @@ class SynthesisNetwork(torch.nn.Module):
         channels = np.rint(np.minimum((channel_base / 2) / cutoffs, channel_max))
         channels[-1] = self.img_channels
 
+        channels, sizes, sampling_rates, cutoffs, half_widths = self.compute_stuff_for_resolution(img_resolution, channel_base, channel_max)
+        channels_1k, sizes_1k, sampling_rates_1k, cutoffs_1k, half_widths_1k = self.compute_stuff_for_resolution(actual_resolution, channel_base, channel_max)
+
         # Construct layers.
         if '360' not in training_mode:
             self.input = SynthesisInput(
@@ -594,19 +673,65 @@ class SynthesisNetwork(torch.nn.Module):
             is_torgb = (idx == self.num_layers)
             is_critically_sampled = (idx >= self.num_layers - self.num_critical)
             use_fp16 = (sampling_rates[idx] * (2 ** self.num_fp16_res) > self.img_resolution)
-            layer = SynthesisLayer(
+            if actual_resolution != img_resolution: # Added
+                print(f'Reminder: using all at {img_resolution} except in_channels={int(channels_1k[prev])} and out_channels={int(channels_1k[idx])}')
+            layer = SynthesisLayer( # changed in_channels to reflex 1k always
                 w_dim=self.w_dim, is_torgb=is_torgb, is_critically_sampled=is_critically_sampled, use_fp16=use_fp16,
-                in_channels=int(channels[prev]), out_channels= int(channels[idx]),
+                in_channels=int(channels_1k[prev]), out_channels=int(channels_1k[idx]),
                 in_size=int(sizes[prev]), out_size=int(sizes[idx]),
                 in_sampling_rate=int(sampling_rates[prev]), out_sampling_rate=int(sampling_rates[idx]),
                 in_cutoff=cutoffs[prev], out_cutoff=cutoffs[idx],
                 in_half_width=half_widths[prev], out_half_width=half_widths[idx],
                 **layer_kwargs)
-            name = f'L{idx}_{layer.out_size[0]}_{layer.out_channels}'
+            #name = f'L{idx}_{layer.out_size[0]}_{layer.out_channels}'
+            name = f'L{idx}_{int(sizes_1k[idx])}_{int(channels_1k[idx])}'
             setattr(self, name, layer)
             self.layer_names.append(name)
 
-    def forward(self, ws, mapped_scale=None, transform=None, crop_fn=None, **layer_kwargs):
+    def compute_stuff_for_resolution(self, img_resolution, channel_base, channel_max): # Added
+        first_cutoff        = 2       # Cutoff frequency of the first layer (f_{c,0}).
+        first_stopband      = 2**2.1  # Minimum stopband of the first layer (f_{t,0}).
+        last_stopband_rel   = 2**0.3  # Minimum stopband of the last layer, expressed relative to the cutoff.
+
+        last_cutoff = img_resolution / 2 # f_{c,N}
+        last_stopband = last_cutoff * last_stopband_rel # f_{t,N}
+        exponents = np.minimum(np.arange(self.num_layers + 1) / (self.num_layers - self.num_critical), 1)
+        cutoffs = first_cutoff * (last_cutoff / first_cutoff) ** exponents # f_c[i]
+        stopbands = first_stopband * (last_stopband / first_stopband) ** exponents # f_t[i]
+
+        # Compute remaining layer parameters.
+        sampling_rates = np.exp2(np.ceil(np.log2(np.minimum(stopbands * 2, img_resolution)))) # s[i]
+        half_widths = np.maximum(stopbands, sampling_rates / 2) - cutoffs # f_h[i]
+        sizes = sampling_rates + self.margin_size * 2
+        sizes[-2:] = img_resolution
+
+        channels = np.rint(np.minimum((channel_base / 2) / cutoffs, channel_max))
+        channels[-1] = self.img_channels
+        print(f"{cutoffs=}")
+        return channels, sizes, sampling_rates, cutoffs, half_widths
+
+    def reconfigure_network(self, img_resolution, channel_base = 32768 * 2, channel_max= 1024): # Added
+        channels, sizes, sampling_rates, cutoffs, half_widths = self.compute_stuff_for_resolution(img_resolution, channel_base, channel_max)
+        channels_1k, sizes_1k, sampling_rates_1k, cutoffs_1k, half_widths_1k = self.compute_stuff_for_resolution(1024, channel_base, channel_max)
+        # reconfigure input (size, sampling rate and bandwidth)
+        self.img_resolution = img_resolution
+        self.input.reconfigure_network(size=int(sizes[0]), sampling_rate=int(sampling_rates[0]), bandwidth=cutoffs_1k[0])
+        # iterate over synthesis layers and reconfigure them        
+        for idx in range(self.num_layers + 1):
+            prev = max(idx - 1, 0)
+            name = f'L{idx}_{int(sizes_1k[idx])}_{int(channels_1k[idx])}'
+            use_fp16 = (sampling_rates[idx] * (2 ** self.num_fp16_res) > self.img_resolution)
+            # reconfigure only in_size, out_size, in_sampling_rate,     out_sampling_rate, in_half_width, out_half_width
+            getattr(self, name).reconfigure_network(
+                in_size=int(sizes[prev]), out_size=int(sizes[idx]),
+                in_sampling_rate=int(sampling_rates[prev]), out_sampling_rate=int(sampling_rates[idx]),
+                in_half_width=half_widths[prev], out_half_width=half_widths[idx], use_fp16=use_fp16)
+    def get_dict_of_up_filters(self): # Added
+        def to_cpu(x):
+            return x.cpu() if x is not None else None
+        return {name:to_cpu(getattr(self, name).up_filter) for name in self.layer_names}
+        
+    def forward(self, ws, mapped_scale=None, transform=None, crop_fn=None, crop_params=None,  **layer_kwargs):
         misc.assert_shape(ws, [None, self.num_ws, self.w_dim])
         ws = ws.to(torch.float32).unbind(dim=1)
         if mapped_scale is not None:
@@ -624,6 +749,10 @@ class SynthesisNetwork(torch.nn.Module):
 
         # Ensure correct shape and dtype.
         misc.assert_shape(x, [None, self.img_channels, self.img_resolution, self.img_resolution])
+        # Added Crop the image, in case crop_fn
+        if crop_fn is not None and crop_params is not None and all([x is not None for x in crop_params]):
+            x = crop_fn(x, crop_params)
+            misc.assert_shape(x, [None, self.img_channels, 1024, 1024]) # TODO: remove or parametrize this 
         x = x.to(torch.float32)
         return x
 
@@ -647,8 +776,10 @@ class Generator(torch.nn.Module):
         mapping_kwargs       = {},  # Arguments for MappingNetwork.
         training_mode        = 'global',
         scale_mapping_kwargs = {},  # Arguments for Scale Mapping Network
+        actual_resolution = None,
         **synthesis_kwargs,         # Arguments for SynthesisNetwork.
     ):
+        self.actual_resolution = actual_resolution if actual_resolution is not None else img_resolution
         super().__init__()
         self.z_dim = z_dim
         self.c_dim = c_dim
@@ -660,6 +791,7 @@ class Generator(torch.nn.Module):
         use_scale_affine = True if 'patch' in self.training_mode else False # add affine layer on style input
         self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels,
                                           training_mode=training_mode, use_scale_affine=use_scale_affine,
+                                          actual_resolution=self.actual_resolution,
                                           **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)

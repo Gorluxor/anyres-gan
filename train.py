@@ -195,7 +195,9 @@ def parse_comma_separated_list(s):
 
 # additional options for 360 model
 @click.option('--fov', help='fov for one frame in the 360 model', type=click.IntRange(min=0), default=60, show_default=True)
-
+# 4096 x 4096 base view
+@click.option('--use_hr', help='use high resolution base view', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--actual_res', help='actual resolution of the base view, if not given, use ', type=click.IntRange(min=0), default=0, show_default=True)
 def main(**kwargs):
 
     # Initialize config.
@@ -266,6 +268,8 @@ def main(**kwargs):
             scale_max=opts.scale_max,
             scale_anneal=opts.scale_anneal,
             base_probability=opts.base_probability,
+            use_hr=opts.use_hr, # Added
+            actual_resolutions=opts.actual_res if opts.actual_res > 0 else opts.g_size, # Added
         )
     elif '360' in training_mode:
         c.G_kwargs.fov = opts.fov

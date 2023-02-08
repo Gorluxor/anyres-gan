@@ -195,12 +195,18 @@ def training_loop(
         for layer_name in teacher.synthesis.layer_names:
             layer = getattr(teacher.synthesis, layer_name)
             layer.use_scale_affine = False
+        if added_kwargs.use_hr is not None:
+                if rank == 0:
+                    print('Changing network to 4k version')
+                common_kwargs_4k = dict(c_dim=training_set.label_dim, img_resolution=added_kwargs.actual_resolution, img_channels=training_set.num_channels)
+                G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs_4k).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
         if rank == 0:
             print(f"loading teacher from {added_kwargs.teacher} on device %s! " % rank)
             with dnnlib.util.open_url(added_kwargs.teacher) as f:
                 teacher_data = legacy.load_network_pkl(f)
             for name, module in [('G', G), ('G_ema', teacher), ('G_ema', G_ema), ('D', D)]:
-                misc.copy_params_and_buffers(teacher_data[name], module, require_all=False)
+                print(f'Loading model {name}')
+                misc.copy_params_and_buffers(teacher_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
             print(f"done loading teacher on device %s! " % rank)
             # util.set_requires_grad(False, teacher)
     else:
@@ -212,15 +218,21 @@ def training_loop(
         with dnnlib.util.open_url(resume_pkl) as f:
             resume_data = legacy.load_network_pkl(f)
         for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
-            misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
+            misc.copy_params_and_buffers(resume_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
 
     # Print network summary tables.
     if rank == 0:
         z = torch.empty([batch_gpu, G.z_dim], device=device)
         c = torch.empty([batch_gpu, G.c_dim], device=device)
-        img = misc.print_module_summary(G, [z, c])
+        print('--- Teacher ---')
+        img = misc.print_module_summary(teacher, [z, c])
+        print('--- Discriminator ---')
         misc.print_module_summary(D, [img, c])
-
+        del img
+        print('--- Generator ---')
+        img = misc.print_module_summary(G, [z, c])
+        del z, c, img
+    torch.cuda.empty_cache()
     # Setup augmentation.
     if rank == 0:
         print('Setting up augmentation...')
@@ -280,14 +292,15 @@ def training_loop(
     grid_z = None
     grid_c = None
     if rank == 0:
-        print('Exporting sample images...')
-        grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
-        save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
-        grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
-        grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-        images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-        save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
-        print('Done exporting sample images...')
+        with torch.no_grad():
+            print('Exporting sample images...')
+            grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
+            save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+            grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
+            grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
+            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+            print('Done exporting sample images...')
 
     # Initialize logs.
     if rank == 0:
@@ -327,6 +340,7 @@ def training_loop(
                     phase_real_c = phase_real_c.to(device).split(batch_gpu)
                     transform = torch.eye(3)[None]
                     phase_transform = transform.repeat(n, 1, 1).to(device).split(batch_gpu)
+                    crop_params = tuple([None] * n for _ in range(n)) # Added  # batch x None tuple
                     min_scale = 1.0
                     max_scale = 1.0
                 else:
@@ -335,6 +349,7 @@ def training_loop(
                     phase_real_img = (data['image'].to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
                     phase_real_c = phase_real_c.to(device).split(batch_gpu)
                     phase_transform = data['params']['transform'].to(device).split(batch_gpu)
+                    crop_params = data['params']['crop_params'].to(device).split(batch_gpu) # Added
                     min_scale = data['params']['min_scale_anneal'][0].item()
                     max_scale = 1.0
             else:
@@ -343,6 +358,7 @@ def training_loop(
                 phase_real_c = phase_real_c.to(device).split(batch_gpu)
                 # dummy variables
                 phase_transform = [None] * len(phase_real_c)
+                crop_params = [None] * len(phase_real_c) # Added
                 min_scale = 1.0
                 max_scale = 1.0
 
@@ -362,10 +378,10 @@ def training_loop(
             # Accumulate gradients.
             phase.opt.zero_grad(set_to_none=True)
             phase.module.requires_grad_(True)
-            for transform, real_img, real_c, gen_z, gen_c in zip(phase_transform, phase_real_img, phase_real_c, phase_gen_z, phase_gen_c):
+            for transform, real_img, real_c, gen_z, gen_c, crop_p in zip(phase_transform, phase_real_img, phase_real_c, phase_gen_z, phase_gen_c, crop_params):
                 loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, transform=transform,
                                           gen_z=gen_z, gen_c=gen_c, gain=phase.interval, cur_nimg=cur_nimg,
-                                          min_scale=min_scale, max_scale=max_scale)
+                                          min_scale=min_scale, max_scale=max_scale, crops=crop_p)
             phase.module.requires_grad_(False)
 
             # Update weights.

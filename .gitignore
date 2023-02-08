@@ -22,7 +22,8 @@ web/
 *.nfs*
 *.m4v
 *.pkl
-
+out*/*
 output/*
 outputs/*
 sh/*
+test*/*

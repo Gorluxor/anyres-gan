@@ -22,7 +22,7 @@ import random
 #----------------------------------------------------------------------------
 
 class Loss:
-    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, gain, cur_nimg): # to be overridden by subclass
+    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, gain, cur_nimg, crops=None): # to be overridden by subclass
         raise NotImplementedError()
 
 #----------------------------------------------------------------------------
@@ -76,14 +76,17 @@ class StyleGAN2Loss(Loss):
                 ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, update_emas=False)[:, cutoff:]
         return ws
 
-    def run_G(self, z, c, transform, update_emas=False):
+    def run_G(self, z, c, transform, crops=None, update_emas=False):
         mapped_scale = None
         crop_fn = None
         if 'patch' in self.training_mode:
             ws = self.G.mapping(z, c, update_emas=update_emas)
             scale, mapped_scale = patch_util.compute_scale_inputs(self.G, ws, transform)
             ws = self.style_mix(z, c, ws)
-            img = self.G.synthesis(ws, mapped_scale=mapped_scale, transform=transform, update_emas=update_emas)
+            # Added crop_fn that takes into account image "crops" and return the corresponding patch
+            crop_fn = lambda imgs, crop_params: torch.stack([curr_img[:, curr_crop[0]:curr_crop[2], curr_crop[1]:curr_crop[3]] for curr_img, curr_crop in zip(imgs, crop_params)])
+            extra_arg = dict() if crops is None else dict(crop_fn=crop_fn, crop_params=crops)
+            img = self.G.synthesis(ws, mapped_scale=mapped_scale, transform=transform, update_emas=update_emas, **extra_arg)
         elif '360' in self.training_mode:
             ws = self.G.mapping(z, c, update_emas=update_emas)
             ws = self.style_mix(z, c, ws)
@@ -118,7 +121,7 @@ class StyleGAN2Loss(Loss):
         return logits
 
     def accumulate_gradients(self, phase, real_img, real_c, transform, gen_z,
-                             gen_c, gain, cur_nimg, min_scale, max_scale):
+                             gen_c, gain, cur_nimg, min_scale, max_scale, crops=None):
         assert phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
         if self.pl_weight == 0:
             phase = {'Greg': 'none', 'Gboth': 'Gmain'}.get(phase, phase)
@@ -129,7 +132,7 @@ class StyleGAN2Loss(Loss):
         # Gmain: Maximize logits for generated images.
         if phase in ['Gmain', 'Gboth']:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform)
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, crops=crops) # Added crops
                 # vutils.save_image(gen_img, 'out_fake_patch.png', range=(-1, 1),
                 #                   normalize=True, nrow=4)
                 gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)

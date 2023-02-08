@@ -152,13 +152,18 @@ def named_params_and_buffers(module):
     assert isinstance(module, torch.nn.Module)
     return list(module.named_parameters()) + list(module.named_buffers())
 
-def copy_params_and_buffers(src_module, dst_module, require_all=False):
+def copy_params_and_buffers(src_module, dst_module, require_all=False, allow_ignore_different_shapes = False, verbose = False):
     assert isinstance(src_module, torch.nn.Module)
     assert isinstance(dst_module, torch.nn.Module)
     src_tensors = dict(named_params_and_buffers(src_module))
     for name, tensor in named_params_and_buffers(dst_module):
         assert (name in src_tensors) or (not require_all)
         if name in src_tensors:
+            if allow_ignore_different_shapes and tensor.shape != src_tensors[name].shape:
+                print(f'Expected Warning: ignoring shape mismatch for {name}: got {src_tensors[name].shape}, expected {tensor.shape}')
+                continue
+            if verbose: 
+                print(f'Copying {name}: got {src_tensors[name].shape}, expected {tensor.shape}')
             tensor.copy_(src_tensors[name].detach()).requires_grad_(tensor.requires_grad)
 
 #----------------------------------------------------------------------------

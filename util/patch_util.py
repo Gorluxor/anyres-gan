@@ -27,7 +27,7 @@ def construct_transformation_matrix(limits):
 
 class PatchSampler(object):
     def __init__(self, patch_size, random_shift=True, random_scale=True, scale_anneal=-1,
-                 max_scale=None, min_scale=None, **kwargs):
+                 max_scale=None, min_scale=None, use_hr=None, **kwargs):
         self.patch_size = patch_size # variable p in paper
         self.random_shift = random_shift
         self.random_scale = random_scale
@@ -88,6 +88,9 @@ class PatchSampler(object):
 
         # calculate the transformation matrix
         transform = construct_transformation_matrix(limits)
+        # make a tensor [(x, y, x+crop_size, y+crop_size)] with the same structure as [x, y, x+crop_size, y+crop_size]
+        #crop_params = torch.tensor([x, y, x+crop_size, y+crop_size]) #.unsqueeze(0)
+        params['crop_params'] = torch.tensor([x, y, x+crop_size, y+crop_size], dtype=torch.long, requires_grad=False)
         params['transform'] = transform
 
         return im_crop, params
