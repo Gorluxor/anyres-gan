@@ -21,7 +21,6 @@ from training import training_loop
 from metrics import metric_main
 from torch_utils import training_stats
 from torch_utils import custom_ops
-
 #----------------------------------------------------------------------------
 
 def subprocess_fn(rank, c, temp_dir):
@@ -42,7 +41,11 @@ def subprocess_fn(rank, c, temp_dir):
     training_stats.init_multiprocessing(rank=rank, sync_device=sync_device)
     if rank != 0:
         custom_ops.verbosity = 'none'
-
+    # with open("testa/settings.pkl", 'wb') as f:
+    #     import pickle
+    #     pickle.dump(c, f)
+    #     import sys
+    #     sys.exit(0)
     # Execute training loop.
     training_loop.training_loop(rank=rank, **c)
 
@@ -181,7 +184,7 @@ def parse_comma_separated_list(s):
 # additional options for patch model
 @click.option('--teacher', help='teacher checkpoint', metavar='[PATH|URL]',  type=str)
 @click.option('--teacher_lambda', help='teacher regularization weight', metavar='FLOAT', type=click.FloatRange(min=0), default=1.0, show_default=True)
-@click.option('--teacher_mode',  help='teacher loss mode', type=click.Choice(['inverse', 'forward']), default='forward', show_default=True)
+@click.option('--teacher_mode',  help='teacher loss mode', type=click.Choice(['inverse', 'forward', 'crop']), default='forward', show_default=True)
 @click.option('--scale_anneal', help='scale annealing rate (-1 for no annealing)', metavar='FLOAT', type=click.FloatRange(min=-1), default=-1, show_default=True)
 @click.option('--scale_min',  help='minimum sampled scale (leave blank to use image native resolution)', metavar='FLOAT', type=click.FloatRange(min=0))
 @click.option('--scale_max',  help='maximum sampled scale', metavar='FLOAT', type=click.FloatRange(min=0), default=1.0, show_default=True)
@@ -198,6 +201,9 @@ def parse_comma_separated_list(s):
 # 4096 x 4096 base view
 @click.option('--use_hr', help='use high resolution base view', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--actual_res', help='actual resolution of the base view, if not given, use ', type=click.IntRange(min=0), default=0, show_default=True)
+@click.option('--use_scale_on_top', help='Should we use scale on top of patch way, or disable it?', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--ds_mode', help='downsampling mode', type=click.Choice(['nearest', 'bilinear', 'average', 'bicubic']), default='average', show_default=True)
+@click.option('--l2_lambda', help='l2 loss weight', metavar='FLOAT', type=click.FloatRange(min=0), default=0.0, show_default=True)
 def main(**kwargs):
 
     # Initialize config.
@@ -205,8 +211,8 @@ def main(**kwargs):
     c = dnnlib.EasyDict() # Main config dict.
     c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
     c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
-    c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
-    c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
+    c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8, weight_decay=opts.l2_lambda)
+    c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8, weight_decay=opts.l2_lambda)
     c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
@@ -241,7 +247,7 @@ def main(**kwargs):
             path=opts.data_hr, resolution=opts.g_size,
             scale_min=opts.scale_min, scale_max=opts.scale_max,
             scale_anneal=opts.scale_anneal, random_crop=opts.patch_crop,
-            use_labels=True, max_size=None, xflip=False)
+            use_labels=True, max_size=None, xflip=False, use_hr=opts.use_hr)
         patch_obj = dnnlib.util.construct_class_by_name(**patch_kwargs) # gets initial args
         patch_name = patch_obj.name
         patch_kwargs.resolution = patch_obj.resolution # Be explicit about resolution.
@@ -269,8 +275,11 @@ def main(**kwargs):
             scale_anneal=opts.scale_anneal,
             base_probability=opts.base_probability,
             use_hr=opts.use_hr, # Added
-            actual_resolutions=opts.actual_res if opts.actual_res > 0 else opts.g_size, # Added
+            use_teached_layers = ['synthesis.L1_36_1024.down_filter', 'synthesis.L2_52_1024.up_filter', 'synthesis.L2_52_1024.down_filter', 'synthesis.L3_52_1024.down_filter', 'synthesis.L4_84_1024.up_filter', 'synthesis.L4_84_1024.down_filter', 'synthesis.L5_148_1024.down_filter', 'synthesis.L7_276_645.down_filter', 'synthesis.L8_276_406.down_filter', 'synthesis.L9_532_256.down_filter', 'synthesis.L10_1044_161.up_filter', 'synthesis.L10_1044_161.down_filter', 'synthesis.L11_1044_102.down_filter', 'synthesis.L12_1044_64.up_filter'],
+            actual_resolution=opts.actual_res if opts.actual_res > 0 else opts.g_size, # Added
         )
+        if opts.use_hr:
+            c.G_kwargs.use_scale_affine = False # TODO:for now disable scaling totally
     elif '360' in training_mode:
         c.G_kwargs.fov = opts.fov
 
@@ -284,6 +293,7 @@ def main(**kwargs):
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
     c.loss_kwargs.r1_gamma = opts.gamma
+    c.loss_kwargs.use_scale_on_top = opts.use_scale_on_top
     c.G_opt_kwargs.lr = (0.002 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
     c.D_opt_kwargs.lr = opts.dlr
     c.metrics = opts.metrics
@@ -294,7 +304,7 @@ def main(**kwargs):
     if 'patch' in training_mode:
         c.patch_kwargs.random_seed = opts.seed
     c.data_loader_kwargs.num_workers = opts.workers
-
+    
     # Sanity checks.
     if c.batch_size % c.num_gpus != 0:
         raise click.ClickException('--batch must be a multiple of --gpus')
@@ -342,7 +352,10 @@ def main(**kwargs):
         c.ada_kimg = 100 # Make ADA react faster at the beginning.
         c.ema_rampup = None # Disable EMA rampup.
         c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.
-
+    if opts.use_hr:
+        c.loss_kwargs.ds_mode = opts.ds_mode # added to support different ds modes
+        #c.G_kwargs.skip_list = ["synthesis.L1_36_1024.down_filter", "synthesis.L2_52_1024.up_filter", "synthesis.L2_52_1024.down_filter", "synthesis.L3_52_1024.down_filter", "synthesis.L4_84_1024.up_filter", "synthesis.L4_84_1024.down_filter", "synthesis.L5_148_1024.down_filter", "synthesis.L7_276_645.down_filter", "synthesis.L8_276_406.down_filter", "synthesis.L9_532_256.down_filter", "synthesis.L10_1044_161.up_filter", "synthesis.L10_1044_161.down_filter", "synthesis.L11_1044_102.down_filter", "synthesis.L12_1044_64.up_filter"]
+        #c.G_kwargs.skip_list = ["synthesis.L1_36_1024.down_filter", "synthesis.L2_52_1024.up_filter", "synthesis.L2_52_1024.down_filter", "synthesis.L3_52_1024.down_filter", "synthesis.L4_84_1024.up_filter", "synthesis.L4_84_1024.down_filter", "synthesis.L5_148_1024.down_filter", "synthesis.L7_276_645.down_filter", "synthesis.L8_276_406.down_filter", "synthesis.L9_532_256.down_filter", "synthesis.L10_1044_161.up_filter", "synthesis.L10_1044_161.down_filter", "synthesis.L11_1044_102.down_filter", "synthesis.L12_1044_64.up_filter"]
     # Performance-related toggles.
     if opts.fp32:
         c.G_kwargs.num_fp16_res = c.D_kwargs.num_fp16_res = 0

@@ -40,7 +40,7 @@ class MetricOptions:
         self.device         = device if device is not None else torch.device('cuda', rank)
         self.progress       = progress.sub() if progress is not None and rank == 0 else ProgressMonitor()
         self.cache          = cache
-
+        self.extra          = dnnlib.EasyDict([])
 #----------------------------------------------------------------------------
 
 _feature_detector_cache = dict()
@@ -280,7 +280,8 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
     # Setup generator and labels.
     G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
     c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen)
-
+    if opts.extra.get('reconfigure_resolution', None) is not None:
+        G.reconfigure_network(img_resolution=opts.extra.reconfigure_resolution)
     # Initialize.
     stats = FeatureStats(**stats_kwargs)
     assert stats.max_items is not None

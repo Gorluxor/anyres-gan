@@ -114,6 +114,13 @@ def pfid(opts, minX, maxY, target_resolution=1024, num=50000, mode='patch'):
 # Recommended metrics.
 
 @register_metric
+def fid2k_base(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    opts.extra.reconfigure_resolution = 1024 # return back to 1k
+    fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=2000)
+    return dict(fid2k_base=fid)
+    
+@register_metric
 def fid50k_full(opts):
     opts.dataset_kwargs.update(max_size=None, xflip=False)
     fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=50000)
@@ -137,6 +144,10 @@ def pfid2k_subpatch(opts): # maybe different values for minX, maxY?
     fid = pfid(opts, minX=256, maxY=1024, target_resolution=1024, num=2000, mode='subpatch')
     return dict(pfid2k_subpatch=fid)
 
+def pfid2k_1024(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fid = pfid(opts, minX=1024, maxY=1024, target_resolution=1024, num=2000, mode='patch')
+    return dict(pfid2k_1024=fid)
 
 @register_metric
 def kid50k_full(opts):

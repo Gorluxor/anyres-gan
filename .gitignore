@@ -27,3 +27,4 @@ output/*
 outputs/*
 sh/*
 test*/*
+.vscode/launch.json

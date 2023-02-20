@@ -11,6 +11,15 @@ def adaptive_downsample256(img, mode='bilinear'):
         return F.interpolate(img, size=(256, 256), mode=mode, align_corners=None if mode=='nearest' else ALIGN_CORNERS_DISABLE_WARNING)
     else:
         return img
+# downsample with average
+def adaptive_downsample256_avg(img):
+    img = img.clamp(-1, 1)
+    if img.shape[-1] > 256:
+        return F.adaptive_avg_pool2d(img, (256, 256))
+        #return F.avg_pool2d(img, 4)
+    else:
+        return img
+
 
 class LPIPS_Loss(nn.Module):
     def __init__(self, model='net-lin', net='vgg', use_gpu=True, spatial=False):

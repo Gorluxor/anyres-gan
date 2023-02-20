@@ -13,7 +13,7 @@ import torch
 from torch_utils import training_stats
 from torch_utils.ops import conv2d_gradfix
 from torch_utils.ops import upfirdn2d
-
+import torchvision
 # added imports
 from metrics import equivariance
 from util import losses, util, patch_util
@@ -43,7 +43,7 @@ def apply_affine_batch(img, transform):
 class StyleGAN2Loss(Loss):
     def __init__(self, device, G, D, augment_pipe=None, r1_gamma=10, style_mixing_prob=0, pl_weight=0, pl_batch_shrink=2,
                  pl_decay=0.01, pl_no_weight_grad=False, blur_init_sigma=0,
-                 blur_fade_kimg=0, teacher=None, added_kwargs=None):
+                 blur_fade_kimg=0, teacher=None, added_kwargs=None, use_scale_on_top=False, ds_mode = None):
         super().__init__()
         self.device             = device
         self.G                  = G
@@ -58,7 +58,8 @@ class StyleGAN2Loss(Loss):
         self.pl_mean            = torch.zeros([], device=device)
         self.blur_init_sigma    = blur_init_sigma
         self.blur_fade_kimg     = blur_fade_kimg
-
+        self.ds_mode            = ds_mode
+        self.use_scale_on_top   = use_scale_on_top
         self.teacher = teacher
         self.added_kwargs = added_kwargs
         self.training_mode = self.G.training_mode
@@ -67,6 +68,7 @@ class StyleGAN2Loss(Loss):
             self.loss_lpips = losses.Masked_LPIPS_Loss(net='alex', device=device)
             util.set_requires_grad(False, self.loss_lpips)
             util.set_requires_grad(False, self.teacher)
+        assert self.ds_mode in ['average', 'bilinear', 'bicubic', 'nearest']
 
     def style_mix(self, z, c, ws):
         if self.style_mixing_prob > 0:
@@ -76,17 +78,19 @@ class StyleGAN2Loss(Loss):
                 ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, update_emas=False)[:, cutoff:]
         return ws
 
-    def run_G(self, z, c, transform, crops=None, update_emas=False):
+    def run_G(self, z, c, transform, slice_range=None, update_emas=False):
         mapped_scale = None
         crop_fn = None
         if 'patch' in self.training_mode:
             ws = self.G.mapping(z, c, update_emas=update_emas)
-            scale, mapped_scale = patch_util.compute_scale_inputs(self.G, ws, transform)
-            ws = self.style_mix(z, c, ws)
-            # Added crop_fn that takes into account image "crops" and return the corresponding patch
-            crop_fn = lambda imgs, crop_params: torch.stack([curr_img[:, curr_crop[0]:curr_crop[2], curr_crop[1]:curr_crop[3]] for curr_img, curr_crop in zip(imgs, crop_params)])
-            extra_arg = dict() if crops is None else dict(crop_fn=crop_fn, crop_params=crops)
-            img = self.G.synthesis(ws, mapped_scale=mapped_scale, transform=transform, update_emas=update_emas, **extra_arg)
+            if self.use_scale_on_top:
+                scale, mapped_scale = patch_util.compute_scale_inputs(self.G, ws, transform)
+                ws = self.style_mix(z, c, ws)
+                img = self.G.synthesis(ws, mapped_scale=mapped_scale, slice_range=slice_range, transform=transform, update_emas=update_emas) # , **extra_arg
+            else: 
+                assert slice_range is not None, 'slice_range must be specified for patch training'
+                ws = self.style_mix(z, c, ws)
+                img = self.G.synthesis(ws, transform=transform, slice_range=slice_range, update_emas=update_emas)
         elif '360' in self.training_mode:
             ws = self.G.mapping(z, c, update_emas=update_emas)
             ws = self.style_mix(z, c, ws)
@@ -121,7 +125,7 @@ class StyleGAN2Loss(Loss):
         return logits
 
     def accumulate_gradients(self, phase, real_img, real_c, transform, gen_z,
-                             gen_c, gain, cur_nimg, min_scale, max_scale, crops=None):
+                             gen_c, gain, cur_nimg, min_scale, max_scale, split, coords):
         assert phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
         if self.pl_weight == 0:
             phase = {'Greg': 'none', 'Gboth': 'Gmain'}.get(phase, phase)
@@ -132,7 +136,7 @@ class StyleGAN2Loss(Loss):
         # Gmain: Maximize logits for generated images.
         if phase in ['Gmain', 'Gboth']:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, crops=crops) # Added crops
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split) # Added crops
                 # vutils.save_image(gen_img, 'out_fake_patch.png', range=(-1, 1),
                 #                   normalize=True, nrow=4)
                 gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
@@ -167,6 +171,37 @@ class StyleGAN2Loss(Loss):
                             losses.adaptive_downsample256(out_mask[:, :1],
                                                        mode='nearest')
                         )
+                    elif self.added_kwargs.teacher_mode == 'crop':
+                        # teacher_crop, teacher_mask = apply_affine_batch(teacher_img, transform)
+                        # crop here is the same
+                        # torchvision.utils.save_image(real_img, "out_real_img.png", range=(-1, 1), normalize=True, nrow=4)
+                        # torchvision.utils.save_image(teacher_crop, 'apply_affine_tc.png', range=(-1, 1), normalize=True, nrow=4)
+                        # torchvision.utils.save_image(gen_img, 'out_fake_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
+                        # torchvision.utils.save_image(teacher_img, 'out_teacher_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
+                        
+                        skip_crop = True if coords is None or coords[0] is None else False
+                        if not skip_crop:
+                            teacher_img = patch_util.pil_crop_on_tensors(teacher_img, coords, r=True) 
+                        # torch.ones_like for B x 1 x H x W
+                        mask = torch.ones_like(teacher_img[:, :1, :, :])
+                        if self.ds_mode == 'average':
+                            gen_img = losses.adaptive_downsample256_avg(gen_img)
+                        else:
+                            gen_img = losses.adaptive_downsample256(gen_img, mode=self.ds_mode)
+                        # gen_img1 = losses.adaptive_downsample256(gen_img.clone(), mode='nearest')
+                        # gen_img2 = losses.adaptive_downsample256(gen_img.clone(), mode='bilinear')
+                        # torchvision.utils.save_image(teacher_img, 'out_teacher_patch_af.png', range=(-1, 1), normalize=True, nrow=4)
+                        # torchvision.utils.save_image(gen_img, 'out_fake_patch_af.png', range=(-1, 1), normalize=True, nrow=4)
+                        l1_loss = self.loss_l1(gen_img, teacher_img, mask)
+
+                        if skip_crop: # This is for 1k training, which isn't tested
+                            # downsample teacher_img 
+                            if self.ds_mode == 'average':
+                                teacher_img = losses.adaptive_downsample256_avg(teacher_img)
+                            else:
+                                teacher_img = losses.adaptive_downsample256(teacher_img, mode=self.ds_mode)
+                        lpips_loss = self.loss_lpips(gen_img, teacher_img, mask) 
+
                     else:
                         assert(False)
                     teacher_loss = (l1_loss + lpips_loss)[:, None]
@@ -184,7 +219,8 @@ class StyleGAN2Loss(Loss):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
                 gen_img, gen_ws = self.run_G(gen_z[:batch_size],
                                              gen_c[:batch_size],
-                                             transform[:batch_size])
+                                             transform[:batch_size], 
+                                             slice_range=split[:batch_size])
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients(self.pl_no_weight_grad):
                     pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
@@ -202,7 +238,7 @@ class StyleGAN2Loss(Loss):
         loss_Dgen = 0
         if phase in ['Dmain', 'Dboth']:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, update_emas=True)
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split, update_emas=True)                
                 gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma, update_emas=True)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())

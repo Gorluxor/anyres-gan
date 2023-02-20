@@ -27,6 +27,7 @@ import legacy
 from metrics import metric_main
 
 from util import util
+from util import patch_util
 import random
 from metrics import equivariance
 
@@ -83,11 +84,13 @@ def save_image_grid(img, fname, drange, grid_size):
     img = img.transpose(0, 3, 1, 4, 2)
     img = img.reshape([gh * H, gw * W, C])
 
+    # check if fname has .jpg extension and set quality to 85 
+    extra_args = dict(quality=85) if fname.endswith('.jpg') else {}
     assert C in [1, 3]
     if C == 1:
-        PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
+        PIL.Image.fromarray(img[:, :, 0], 'L').save(fname, **extra_args)
     if C == 3:
-        PIL.Image.fromarray(img, 'RGB').save(fname)
+        PIL.Image.fromarray(img, 'RGB').save(fname, **extra_args)
 
 #----------------------------------------------------------------------------
 
@@ -184,28 +187,35 @@ def training_loop(
     common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=img_resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
-    G_ema = copy.deepcopy(G).eval()
+    if 'patch' in training_mode and added_kwargs.teacher is not None:
+        teacher = copy.deepcopy(G).to(device).eval()
 
+    if added_kwargs.use_hr and added_kwargs.use_teached_layers:
+        reset_value_dict = dnnlib.EasyDict()
+        for layer_name in added_kwargs.use_teached_layers:
+            reset_value_dict[layer_name] = teacher.state_dict()[layer_name]
 
+    if added_kwargs.use_hr == True and 'patch' in training_mode:
+        common_kwargs_4k = dict(c_dim=training_set.label_dim, actual_resolution=img_resolution, img_resolution=added_kwargs.actual_resolution, img_channels=training_set.num_channels)
+        if rank == 0:
+            print('Changing network to 4k version')
+        G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs_4k).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
+        
+    G_ema = copy.deepcopy(G).eval()    
+    G.synthesis.add_reset_layers(reset_value_dict)
     # copy G for teacher network: copy teacher G_ema to G_ema:,
     # uses G state dict for the generator to align with D
     if 'patch' in training_mode and added_kwargs.teacher is not None:
-        teacher = copy.deepcopy(G).to(device).eval()
         # deactivate scale affine adding in teacher model; so it matches original model
         for layer_name in teacher.synthesis.layer_names:
             layer = getattr(teacher.synthesis, layer_name)
             layer.use_scale_affine = False
-        if added_kwargs.use_hr is not None:
-                if rank == 0:
-                    print('Changing network to 4k version')
-                common_kwargs_4k = dict(c_dim=training_set.label_dim, img_resolution=added_kwargs.actual_resolution, img_channels=training_set.num_channels)
-                G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs_4k).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
+
         if rank == 0:
             print(f"loading teacher from {added_kwargs.teacher} on device %s! " % rank)
             with dnnlib.util.open_url(added_kwargs.teacher) as f:
                 teacher_data = legacy.load_network_pkl(f)
             for name, module in [('G', G), ('G_ema', teacher), ('G_ema', G_ema), ('D', D)]:
-                print(f'Loading model {name}')
                 misc.copy_params_and_buffers(teacher_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
             print(f"done loading teacher on device %s! " % rank)
             # util.set_requires_grad(False, teacher)
@@ -229,10 +239,12 @@ def training_loop(
         print('--- Discriminator ---')
         misc.print_module_summary(D, [img, c])
         del img
+        torch.cuda.empty_cache()
         print('--- Generator ---')
-        img = misc.print_module_summary(G, [z, c])
+        img = misc.print_module_summary(G, [z[:1,:], c[:1,:]])
         del z, c, img
-    torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
+    
     # Setup augmentation.
     if rank == 0:
         print('Setting up augmentation...')
@@ -265,7 +277,7 @@ def training_loop(
                                                added_kwargs=added_kwargs, teacher=teacher, **loss_kwargs) # subclass of training.loss.Loss
 
     phases = []
-
+    # return G, G_ema, loss
     for name, module, params, opt_kwargs, reg_interval in [('G', G, G.parameters(), G_opt_kwargs, G_reg_interval),
                                                            ('D', D, D.parameters(), D_opt_kwargs, D_reg_interval)]:
         if reg_interval is None:
@@ -291,17 +303,22 @@ def training_loop(
     grid_size = None
     grid_z = None
     grid_c = None
+    # empty cuda
+    torch.cuda.empty_cache()
     if rank == 0:
         with torch.no_grad():
+            # print('Exporting samples skipped...')
             print('Exporting sample images...')
             grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
-            save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+            save_image_grid(images, os.path.join(run_dir, 'reals.jpg'), drange=[0,255], grid_size=grid_size)
             grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
             grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
+            del images
             images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+            save_image_grid(images, os.path.join(run_dir, 'fakes_init.jpg'), drange=[-1,1], grid_size=grid_size)
             print('Done exporting sample images...')
-
+            del images
+    torch.cuda.empty_cache()
     # Initialize logs.
     if rank == 0:
         print('Initializing logs...')
@@ -316,7 +333,6 @@ def training_loop(
             stats_tfevents = tensorboard.SummaryWriter(run_dir)
         except ImportError as err:
             print('Skipping tfevents export:', err)
-
     # Train.
     if rank == 0:
         print(f'Training for {total_kimg} kimg...')
@@ -340,16 +356,33 @@ def training_loop(
                     phase_real_c = phase_real_c.to(device).split(batch_gpu)
                     transform = torch.eye(3)[None]
                     phase_transform = transform.repeat(n, 1, 1).to(device).split(batch_gpu)
-                    crop_params = tuple([None] * n for _ in range(n)) # Added  # batch x None tuple
                     min_scale = 1.0
                     max_scale = 1.0
+                    # if use_hr, we are going to generate random split_range, and coresponding coordinates
+                    # this will be later used to crop the original image?
+                    # produce 
+                    if added_kwargs.use_hr:
+                        # split_range_values = patch_util.generate_random_positions_tensor(n)
+                        # coords = patch_util.grid2pixel_tensor_f(split_range_values.clone(), 256, 64).split(batch_gpu)
+                        # split_range = split_range_values.split(batch_gpu)
+                        # split_range 
+                        split_range = torch.tensor([0, 36, 0, 36]).repeat(batch_size).split(batch_gpu) # identity
+                        coords = [None] * len(phase_real_c)
+                        print("WARNING: this is still not tested...")
+                        raise NotImplementedError("Even though probably will work, logically not tested")
+                        # TODO: maybe parametrize this better? now it only works for x4
+                        # In this case, there are coords to be cropped on the 1k teacher supervision
+                    # split_range = [None] * len(phase_real_c)
+                    # coords = [None] * len(phase_real_c)
                 else:
                     # patch dataset iterator
                     data, phase_real_c = next(patch_dset_iterator)
                     phase_real_img = (data['image'].to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
                     phase_real_c = phase_real_c.to(device).split(batch_gpu)
                     phase_transform = data['params']['transform'].to(device).split(batch_gpu)
-                    crop_params = data['params']['crop_params'].to(device).split(batch_gpu) # Added
+                    split_range_data = torch.stack(data['params']['split_range']).permute(1,0).to(device)
+                    coords = patch_util.grid2pixel_tensor_f(split_range_data.clone(), 256, 64).split(batch_gpu) #TODO: parameterize this?
+                    split_range = split_range_data.split(batch_gpu)
                     min_scale = data['params']['min_scale_anneal'][0].item()
                     max_scale = 1.0
             else:
@@ -358,7 +391,8 @@ def training_loop(
                 phase_real_c = phase_real_c.to(device).split(batch_gpu)
                 # dummy variables
                 phase_transform = [None] * len(phase_real_c)
-                crop_params = [None] * len(phase_real_c) # Added
+                coords = [None] * len(phase_real_c)
+                split_range = [None] * len(phase_real_c)
                 min_scale = 1.0
                 max_scale = 1.0
 
@@ -367,7 +401,7 @@ def training_loop(
             all_gen_c = [training_set.get_label(np.random.randint(len(training_set))) for _ in range(len(phases) * batch_size)]
             all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
             all_gen_c = [phase_gen_c.split(batch_gpu) for phase_gen_c in all_gen_c.split(batch_size)]
-
+                        
         # Execute training phases.
         for phase, phase_gen_z, phase_gen_c in zip(phases, all_gen_z, all_gen_c):
             if batch_idx % phase.interval != 0:
@@ -378,10 +412,10 @@ def training_loop(
             # Accumulate gradients.
             phase.opt.zero_grad(set_to_none=True)
             phase.module.requires_grad_(True)
-            for transform, real_img, real_c, gen_z, gen_c, crop_p in zip(phase_transform, phase_real_img, phase_real_c, phase_gen_z, phase_gen_c, crop_params):
+            for transform, real_img, real_c, gen_z, gen_c, curr_split, curr_coords in zip(phase_transform, phase_real_img, phase_real_c, phase_gen_z, phase_gen_c, split_range, coords):
                 loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, transform=transform,
                                           gen_z=gen_z, gen_c=gen_c, gain=phase.interval, cur_nimg=cur_nimg,
-                                          min_scale=min_scale, max_scale=max_scale, crops=crop_p)
+                                          min_scale=min_scale, max_scale=max_scale, split=curr_split, coords=curr_coords)
             phase.module.requires_grad_(False)
 
             # Update weights.
@@ -442,6 +476,11 @@ def training_loop(
         fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
         torch.cuda.reset_peak_memory_stats()
         fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
+        
+        fields += [f'G/loss {stats_collector["Loss/G/loss"]:<3.2f}']
+        teacher_loss = stats_collector["Loss/G/loss_teacher_l1"] + stats_collector["Loss/G/loss_teacher_lpips"]
+        fields += [f'G/loss_teacher {teacher_loss:<3.2f}']
+        fields += [f'D/loss {stats_collector["Loss/D/loss"]:<3.2f}']
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
         if rank == 0:
@@ -457,7 +496,7 @@ def training_loop(
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
             images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
+            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
 
         # Save network snapshot.
         snapshot_pkl = None
