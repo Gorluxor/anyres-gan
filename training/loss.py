@@ -68,7 +68,8 @@ class StyleGAN2Loss(Loss):
             self.loss_lpips = losses.Masked_LPIPS_Loss(net='alex', device=device)
             util.set_requires_grad(False, self.loss_lpips)
             util.set_requires_grad(False, self.teacher)
-        assert self.ds_mode in ['average', 'bilinear', 'bicubic', 'nearest']
+        if self.added_kwargs.teacher_mode == 'crop':
+            assert self.ds_mode in ['average', 'bilinear', 'bicubic', 'nearest']
 
     def style_mix(self, z, c, ws):
         if self.style_mixing_prob > 0:
@@ -83,12 +84,12 @@ class StyleGAN2Loss(Loss):
         crop_fn = None
         if 'patch' in self.training_mode:
             ws = self.G.mapping(z, c, update_emas=update_emas)
-            if self.use_scale_on_top:
+            if not self.added_kwargs.use_hr or self.use_scale_on_top:
                 scale, mapped_scale = patch_util.compute_scale_inputs(self.G, ws, transform)
                 ws = self.style_mix(z, c, ws)
                 img = self.G.synthesis(ws, mapped_scale=mapped_scale, slice_range=slice_range, transform=transform, update_emas=update_emas) # , **extra_arg
             else: 
-                assert slice_range is not None, 'slice_range must be specified for patch training'
+                assert slice_range is not None, f'slice_range must be specified for patch training with {self.added_kwargs.use_hr}'
                 ws = self.style_mix(z, c, ws)
                 img = self.G.synthesis(ws, transform=transform, slice_range=slice_range, update_emas=update_emas)
         elif '360' in self.training_mode:

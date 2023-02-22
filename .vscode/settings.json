@@ -19,6 +19,7 @@
         "titleBar.inactiveForeground": "#e7e7e799"
     },
     "peacock.remoteColor": "#0b0b32",
+    "python.languageServer": "Pylance",
     "terminal.integrated.env.linux": {
         "CUDA_VISIBLE_DEVICES": "0",
         "NCCL_DEBUG": "INFO",

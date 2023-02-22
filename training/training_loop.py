@@ -202,7 +202,8 @@ def training_loop(
         G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs_4k).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
         
     G_ema = copy.deepcopy(G).eval()    
-    G.synthesis.add_reset_layers(reset_value_dict)
+    if added_kwargs.use_hr:
+        G.synthesis.add_reset_layers(reset_value_dict)
     # copy G for teacher network: copy teacher G_ema to G_ema:,
     # uses G state dict for the generator to align with D
     if 'patch' in training_mode and added_kwargs.teacher is not None:
@@ -372,17 +373,22 @@ def training_loop(
                         raise NotImplementedError("Even though probably will work, logically not tested")
                         # TODO: maybe parametrize this better? now it only works for x4
                         # In this case, there are coords to be cropped on the 1k teacher supervision
-                    # split_range = [None] * len(phase_real_c)
-                    # coords = [None] * len(phase_real_c)
+                    else:
+                        split_range = [None] * len(phase_real_c)
+                        coords = [None] * len(phase_real_c)
                 else:
                     # patch dataset iterator
                     data, phase_real_c = next(patch_dset_iterator)
                     phase_real_img = (data['image'].to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
                     phase_real_c = phase_real_c.to(device).split(batch_gpu)
                     phase_transform = data['params']['transform'].to(device).split(batch_gpu)
-                    split_range_data = torch.stack(data['params']['split_range']).permute(1,0).to(device)
-                    coords = patch_util.grid2pixel_tensor_f(split_range_data.clone(), 256, 64).split(batch_gpu) #TODO: parameterize this?
-                    split_range = split_range_data.split(batch_gpu)
+                    if added_kwargs.use_hr:
+                        split_range_data = torch.stack(data['params']['split_range']).permute(1,0).to(device)
+                        coords = patch_util.grid2pixel_tensor_f(split_range_data.clone(), 256, 64).split(batch_gpu) #TODO: parameterize this?
+                        split_range = split_range_data.split(batch_gpu)
+                    else:
+                        split_range = [None] * len(phase_real_c)
+                        coords = [None] * len(phase_real_c)
                     min_scale = data['params']['min_scale_anneal'][0].item()
                     max_scale = 1.0
             else:
