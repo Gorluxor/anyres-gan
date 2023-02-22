@@ -78,11 +78,11 @@ class StyleGAN2Loss(Loss):
                 ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, update_emas=False)[:, cutoff:]
         return ws
 
-    def run_G(self, z, c, transform, slice_range=None, update_emas=False):
+    def run_G(self, z, c, transform, slice_range=None, flag=None, update_emas=False):
         mapped_scale = None
         crop_fn = None
         if 'patch' in self.training_mode:
-            ws = self.G.mapping(z, c, update_emas=update_emas)
+            ws = self.G.mapping(z, c, update_emas=update_emas, flag=flag)
             if self.use_scale_on_top:
                 scale, mapped_scale = patch_util.compute_scale_inputs(self.G, ws, transform)
                 ws = self.style_mix(z, c, ws)
@@ -132,11 +132,13 @@ class StyleGAN2Loss(Loss):
         if self.r1_gamma == 0:
             phase = {'Dreg': 'none', 'Dboth': 'Dmain'}.get(phase, phase)
         blur_sigma = max(1 - cur_nimg / (self.blur_fade_kimg * 1e3), 0) * self.blur_init_sigma if self.blur_fade_kimg > 0 else 0
-
         # Gmain: Maximize logits for generated images.
+        teacher_loss = None
         if phase in ['Gmain', 'Gboth']:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split) # Added crops
+                # ones, size of batch size
+                flag_of_ones = torch.ones((gen_z.shape[0], 1), device=gen_z.device)
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split, flag=flag_of_ones) # Added crops
                 # vutils.save_image(gen_img, 'out_fake_patch.png', range=(-1, 1),
                 #                   normalize=True, nrow=4)
                 gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
@@ -171,16 +173,11 @@ class StyleGAN2Loss(Loss):
                             losses.adaptive_downsample256(out_mask[:, :1],
                                                        mode='nearest')
                         )
-                    elif self.added_kwargs.teacher_mode == 'crop':
-                        # teacher_crop, teacher_mask = apply_affine_batch(teacher_img, transform)
-                        # crop here is the same
-                        # torchvision.utils.save_image(real_img, "out_real_img.png", range=(-1, 1), normalize=True, nrow=4)
-                        # torchvision.utils.save_image(teacher_crop, 'apply_affine_tc.png', range=(-1, 1), normalize=True, nrow=4)
-                        # torchvision.utils.save_image(gen_img, 'out_fake_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
-                        # torchvision.utils.save_image(teacher_img, 'out_teacher_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
-                        
-                        skip_crop = True if coords is None or coords[0] is None else False
-                        if not skip_crop:
+                    elif self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcond == False:
+                        #gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split)
+                        # rerun with flag 0's
+                        skip_crop = False if coords is None or coords[0] is None else True
+                        if skip_crop:
                             teacher_img = patch_util.pil_crop_on_tensors(teacher_img, coords, r=True) 
                         # torch.ones_like for B x 1 x H x W
                         mask = torch.ones_like(teacher_img[:, :1, :, :])
@@ -193,34 +190,74 @@ class StyleGAN2Loss(Loss):
                         # torchvision.utils.save_image(teacher_img, 'out_teacher_patch_af.png', range=(-1, 1), normalize=True, nrow=4)
                         # torchvision.utils.save_image(gen_img, 'out_fake_patch_af.png', range=(-1, 1), normalize=True, nrow=4)
                         l1_loss = self.loss_l1(gen_img, teacher_img, mask)
-
-                        if skip_crop: # This is for 1k training, which isn't tested
+                        if not skip_crop: # This is for 1k training, which isn't tested
                             # downsample teacher_img 
                             if self.ds_mode == 'average':
                                 teacher_img = losses.adaptive_downsample256_avg(teacher_img)
                             else:
                                 teacher_img = losses.adaptive_downsample256(teacher_img, mode=self.ds_mode)
-                        lpips_loss = self.loss_lpips(gen_img, teacher_img, mask) 
-
+                        lpips_loss = self.loss_lpips(gen_img, teacher_img, mask)
+                        lossTeacher = (l1_loss + lpips_loss)[:, None] * self.added_kwargs.teacher_lambda
+                        training_stats.report('Loss/G/loss_teacher_l1', l1_loss)
+                        training_stats.report('Loss/G/loss_teacher_lpips', lpips_loss)
+                        if phase == 'Gmain' or loss_Gmain is not None:
+                            training_stats.report('Loss/G/loss_total', lossTeacher + loss_Gmain)
+                        else:
+                            training_stats.report('Loss/G/loss_reg', lossTeacher)
+                    elif self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcond == True:
+                        pass # using bcond and Greg
                     else:
                         assert(False)
-                    teacher_loss = (l1_loss + lpips_loss)[:, None]
-                    loss_Gmain = (loss_Gmain + self.added_kwargs.teacher_lambda
-                                  * teacher_loss)
-                    training_stats.report('Loss/G/loss_teacher_l1', l1_loss)
-                    training_stats.report('Loss/G/loss_teacher_lpips', lpips_loss)
-                    training_stats.report('Loss/G/loss_total', loss_Gmain)
+                    loss_Gmain = (loss_Gmain + self.added_kwargs.teacher_lambda * teacher_loss) if teacher_loss else loss_Gmain
+                    if teacher_loss:
+                        training_stats.report('Loss/G/loss_teacher_l1', l1_loss)
+                        training_stats.report('Loss/G/loss_teacher_lpips', lpips_loss)
+                    if phase == 'Gmain' or teacher_loss is not None:
+                        training_stats.report('Loss/G/loss_total', loss_Gmain)
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 loss_Gmain.mean().mul(gain).backward()
-
+        # if phase in ['Greg']:
+        #     if self.added_kwargs.teacher_mode == 'crop':
+        #         del gen_img
+        #         torch.cuda.empty_cache()
+        #         gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split)
+        #         # rerun with flag 0's
+        #         skip_crop = False if coords is None or coords[0] is None else True
+        #         if skip_crop:
+        #             teacher_img = patch_util.pil_crop_on_tensors(teacher_img, coords, r=True) 
+        #         # torch.ones_like for B x 1 x H x W
+        #         mask = torch.ones_like(teacher_img[:, :1, :, :])
+        #         if self.ds_mode == 'average':
+        #             gen_img = losses.adaptive_downsample256_avg(gen_img)
+        #         else:
+        #             gen_img = losses.adaptive_downsample256(gen_img, mode=self.ds_mode)
+        #         l1_loss = self.loss_l1(gen_img, teacher_img, mask)
+        #         if not skip_crop: # This is for 1k training, which isn't tested
+        #             # downsample teacher_img 
+        #             if self.ds_mode == 'average':
+        #                 teacher_img = losses.adaptive_downsample256_avg(teacher_img)
+        #             else:
+        #                 teacher_img = losses.adaptive_downsample256(teacher_img, mode=self.ds_mode)
+        #         lpips_loss = self.loss_lpips(gen_img, teacher_img, mask)
+        #         lossTeacher = (l1_loss + lpips_loss)[:, None] * self.added_kwargs.teacher_lambda
+        #         training_stats.report('Loss/G/loss_teacher_l1', l1_loss)
+        #         training_stats.report('Loss/G/loss_teacher_lpips', lpips_loss)
+        #         if phase == 'Gmain' or loss_Gmain is not None:
+        #             training_stats.report('Loss/G/loss_total', lossTeacher + loss_Gmain)
+        #         else:
+        #             training_stats.report('Loss/G/loss_reg', lossTeacher)
+        #     with torch.autograd.profiler.record_function('Gmain_backward'):
+        #         lossTeacher.mean().mul(gain).backward()
         # Gpl: Apply path length regularization.
         if phase in ['Greg', 'Gboth']:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
+                ones = torch.ones(batch_size, 1, device=gen_z.device)
                 gen_img, gen_ws = self.run_G(gen_z[:batch_size],
                                              gen_c[:batch_size],
                                              transform[:batch_size], 
-                                             slice_range=split[:batch_size])
+                                             slice_range=split[:batch_size], 
+                                             flag=ones)
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients(self.pl_no_weight_grad):
                     pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
@@ -238,7 +275,8 @@ class StyleGAN2Loss(Loss):
         loss_Dgen = 0
         if phase in ['Dmain', 'Dboth']:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split, update_emas=True)                
+                ones = torch.ones(gen_z.shape[0], 1, device=gen_z.device)
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split, update_emas=True, flag=ones)                
                 gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma, update_emas=True)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())

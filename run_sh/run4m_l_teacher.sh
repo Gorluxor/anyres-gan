@@ -29,14 +29,14 @@ rm -rf ~/.cache/torch_extensions
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py --cfg=stylegan3-r --gpus=4 --batch=32 --gamma=2 \
 	--mirror=1 --aug=noaug --kimg 200 --snap 1  --batch-gpu 4 \
 	--outdir training-runs/SS \
-    --data /../SS/LR \
+    --data ../SS/LR \
 	--training_mode=patch --g_size 1024 --random_crop=True \
 	--teacher ./pretrained/stylegan3-r-ffhq-1024x1024.pkl \
-	--data_hr /../SS/HR \
+	--data_hr ../SS/HR \
 	--metrics fid2k_base --teacher_lambda 12 --teacher_mode crop --scale_max 1 --scale_min 1 \
 	--scale_anneal -1 --scale_mapping_min 1 --scale_mapping_max 1 --patch_crop=True \
     --use_hr=True --use_scale_on_top=False --actual_res 4096 --ds_mode bicubic --base_probability 2\
-	--l2_lambda 0 
+	--l2_lambda 0 --bcond=True
 
 # For now scale mapping is disabled, as well as mapping 
 # Actual res is always 4096 for our mode, when used with use_hr=True

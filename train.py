@@ -204,12 +204,13 @@ def parse_comma_separated_list(s):
 @click.option('--use_scale_on_top', help='Should we use scale on top of patch way, or disable it?', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--ds_mode', help='downsampling mode', type=click.Choice(['nearest', 'bilinear', 'average', 'bicubic']), default='average', show_default=True)
 @click.option('--l2_lambda', help='l2 loss weight', metavar='FLOAT', type=click.FloatRange(min=0), default=0.0, show_default=True)
+@click.option('--bcond', help='binary flag for conditional training', metavar='BOOL', type=bool, default=False, show_default=True)
 def main(**kwargs):
 
     # Initialize config.
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
     c = dnnlib.EasyDict() # Main config dict.
-    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
+    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), bcond = opts.bcond)
     c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8, weight_decay=opts.l2_lambda)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8, weight_decay=opts.l2_lambda)
@@ -275,6 +276,7 @@ def main(**kwargs):
             scale_anneal=opts.scale_anneal,
             base_probability=opts.base_probability,
             use_hr=opts.use_hr, # Added
+            bcond=opts.bcond,
             use_teached_layers = ['synthesis.L1_36_1024.down_filter', 'synthesis.L2_52_1024.up_filter', 'synthesis.L2_52_1024.down_filter', 'synthesis.L3_52_1024.down_filter', 'synthesis.L4_84_1024.up_filter', 'synthesis.L4_84_1024.down_filter', 'synthesis.L5_148_1024.down_filter', 'synthesis.L7_276_645.down_filter', 'synthesis.L8_276_406.down_filter', 'synthesis.L9_532_256.down_filter', 'synthesis.L10_1044_161.up_filter', 'synthesis.L10_1044_161.down_filter', 'synthesis.L11_1044_102.down_filter', 'synthesis.L12_1044_64.up_filter'],
             actual_resolution=opts.actual_res if opts.actual_res > 0 else opts.g_size, # Added
         )
@@ -354,8 +356,8 @@ def main(**kwargs):
         c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.
     if opts.use_hr:
         c.loss_kwargs.ds_mode = opts.ds_mode # added to support different ds modes
-        #c.G_kwargs.skip_list = ["synthesis.L1_36_1024.down_filter", "synthesis.L2_52_1024.up_filter", "synthesis.L2_52_1024.down_filter", "synthesis.L3_52_1024.down_filter", "synthesis.L4_84_1024.up_filter", "synthesis.L4_84_1024.down_filter", "synthesis.L5_148_1024.down_filter", "synthesis.L7_276_645.down_filter", "synthesis.L8_276_406.down_filter", "synthesis.L9_532_256.down_filter", "synthesis.L10_1044_161.up_filter", "synthesis.L10_1044_161.down_filter", "synthesis.L11_1044_102.down_filter", "synthesis.L12_1044_64.up_filter"]
-        #c.G_kwargs.skip_list = ["synthesis.L1_36_1024.down_filter", "synthesis.L2_52_1024.up_filter", "synthesis.L2_52_1024.down_filter", "synthesis.L3_52_1024.down_filter", "synthesis.L4_84_1024.up_filter", "synthesis.L4_84_1024.down_filter", "synthesis.L5_148_1024.down_filter", "synthesis.L7_276_645.down_filter", "synthesis.L8_276_406.down_filter", "synthesis.L9_532_256.down_filter", "synthesis.L10_1044_161.up_filter", "synthesis.L10_1044_161.down_filter", "synthesis.L11_1044_102.down_filter", "synthesis.L12_1044_64.up_filter"]
+        if opts.bcond:
+            c.G_reg_interval = 1 # Disable lazy regularization for G. We are using it because we are training 2 f's
     # Performance-related toggles.
     if opts.fp32:
         c.G_kwargs.num_fp16_res = c.D_kwargs.num_fp16_res = 0

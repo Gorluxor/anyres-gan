@@ -159,6 +159,15 @@ def copy_params_and_buffers(src_module, dst_module, require_all=False, allow_ign
     for name, tensor in named_params_and_buffers(dst_module):
         assert (name in src_tensors) or (not require_all)
         if name in src_tensors:
+            # special case for mapping bcond, check if fc0.weight is one less, add to weight by initializing it 
+            if name == "mapping.fc0.weight" or name == "fc0.weight":
+                if tensor.shape[1] == src_tensors[name].shape[1] + 1:
+                    # create new weight from existing src_tensor, and zeros, on the required device
+                    new_weight = torch.concat((src_tensors[name].detach(), torch.zeros(src_tensors[name].shape[1], 1, device=src_tensors[name].device)), dim=1)
+                    tensor.copy_(new_weight).requires_grad_(tensor.requires_grad)
+                    continue
+                elif tensor.shape[1] +1 == src_tensors[name].shape[1]:
+                    raise NotImplementedError("mapping.fc0.weight is not one less than src_tensor, not implemented")
             if allow_ignore_different_shapes and tensor.shape != src_tensors[name].shape:
                 print(f'Expected Warning: ignoring shape mismatch for {name}: got {src_tensors[name].shape}, expected {tensor.shape}')
                 continue

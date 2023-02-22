@@ -117,6 +117,7 @@ class MappingNetwork(torch.nn.Module):
         num_layers      = 2,        # Number of mapping layers.
         lr_multiplier   = 0.01,     # Learning rate multiplier for the mapping layers.
         w_avg_beta      = 0.998,    # Decay for tracking the moving average of W during training.
+        bcond           = False,    # Whether to use binary conditioning
     ):
         super().__init__()
         self.z_dim = z_dim
@@ -125,16 +126,16 @@ class MappingNetwork(torch.nn.Module):
         self.num_ws = num_ws
         self.num_layers = num_layers
         self.w_avg_beta = w_avg_beta
-
+        self.bcond = bcond
         # Construct layers.
         self.embed = FullyConnectedLayer(self.c_dim, self.w_dim) if self.c_dim > 0 else None
-        features = [self.z_dim + (self.w_dim if self.c_dim > 0 else 0)] + [self.w_dim] * self.num_layers
+        features = [self.z_dim + (self.w_dim if self.c_dim > 0 else 0) + int(bcond)] + [self.w_dim] * self.num_layers
         for idx, in_features, out_features in zip(range(num_layers), features[:-1], features[1:]):
             layer = FullyConnectedLayer(in_features, out_features, activation='lrelu', lr_multiplier=lr_multiplier)
             setattr(self, f'fc{idx}', layer)
         self.register_buffer('w_avg', torch.zeros([w_dim]))
 
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False):
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, flag=None):
         misc.assert_shape(z, [None, self.z_dim])
         if truncation_cutoff is None:
             truncation_cutoff = self.num_ws
@@ -147,6 +148,15 @@ class MappingNetwork(torch.nn.Module):
             y = self.embed(c.to(torch.float32))
             y = y * (y.square().mean(1, keepdim=True) + 1e-8).rsqrt()
             x = torch.cat([x, y], dim=1) if x is not None else y
+        
+        if self.bcond:
+            if flag is None:
+                flag = torch.zeros([z.shape[0], 1])
+            # print(flag.shape)
+            misc.assert_shape(flag, [None, 1])
+            flag = flag.to(torch.float32).to(z.device)
+
+        x = torch.cat([x, flag], dim=1) if self.bcond else x
 
         # Execute layers.
         for idx in range(self.num_layers):
@@ -163,7 +173,7 @@ class MappingNetwork(torch.nn.Module):
         return x
 
     def extra_repr(self):
-        return f'z_dim={self.z_dim:d}, c_dim={self.c_dim:d}, w_dim={self.w_dim:d}, num_ws={self.num_ws:d}'
+        return f'z_dim={self.z_dim:d}, c_dim={self.c_dim:d}, w_dim={self.w_dim:d}, num_ws={self.num_ws:d}, bcond={self.bcond}'
 
 #----------------------------------------------------------------------------
 
@@ -814,7 +824,8 @@ class Generator(torch.nn.Module):
         mapping_kwargs       = {},  # Arguments for MappingNetwork.
         training_mode        = 'global',
         scale_mapping_kwargs = {},  # Arguments for Scale Mapping Network
-        actual_resolution = None,
+        actual_resolution    = None,
+        bcond                = False, # just given to the mapping network, if we conditiong the z input with extra
         **synthesis_kwargs,         # Arguments for SynthesisNetwork.
     ):
         self.actual_resolution = actual_resolution if actual_resolution is not None else img_resolution
@@ -835,7 +846,7 @@ class Generator(torch.nn.Module):
                                           actual_resolution=self.actual_resolution,
                                           **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
-        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, bcond=bcond, **mapping_kwargs)
         if 'patch' in self.training_mode: # Added to check if we actually use scale
             self.scale_mapping_kwargs = scale_mapping_kwargs
             scale_mapping_norm = scale_mapping_kwargs.scale_mapping_norm

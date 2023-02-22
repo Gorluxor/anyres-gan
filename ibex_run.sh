@@ -13,6 +13,7 @@
 #SBATCH --signal=B:USR1@600
 #SBATCH --reservation=A100
 
+#SBATCH --account conf-iccv-2023.03.08-wonkap
 sig_handler()
 {
 echo "Force closing connection" && exit 0
