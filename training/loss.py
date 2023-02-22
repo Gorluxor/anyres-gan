@@ -179,9 +179,14 @@ class StyleGAN2Loss(Loss):
                         # torchvision.utils.save_image(gen_img, 'out_fake_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
                         # torchvision.utils.save_image(teacher_img, 'out_teacher_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
                         
-                        skip_crop = True if coords is None or coords[0] is None else False
-                        if not skip_crop:
-                            teacher_img = patch_util.pil_crop_on_tensors(teacher_img, coords, r=True) 
+                        should_crop = True if coords is not None and coords[0] is not None else False
+                        if should_crop:
+                            teacher_img = patch_util.pil_crop_on_tensors(teacher_img, coords, r=True)
+                        else: 
+                            if self.ds_mode == 'average':
+                                teacher_img = losses.adaptive_downsample256_avg(teacher_img)
+                            else:
+                                teacher_img = losses.adaptive_downsample256(teacher_img, mode=self.ds_mode)
                         # torch.ones_like for B x 1 x H x W
                         mask = torch.ones_like(teacher_img[:, :1, :, :])
                         if self.ds_mode == 'average':
@@ -192,14 +197,7 @@ class StyleGAN2Loss(Loss):
                         # gen_img2 = losses.adaptive_downsample256(gen_img.clone(), mode='bilinear')
                         # torchvision.utils.save_image(teacher_img, 'out_teacher_patch_af.png', range=(-1, 1), normalize=True, nrow=4)
                         # torchvision.utils.save_image(gen_img, 'out_fake_patch_af.png', range=(-1, 1), normalize=True, nrow=4)
-                        l1_loss = self.loss_l1(gen_img, teacher_img, mask)
-
-                        if skip_crop: # This is for 1k training, which isn't tested
-                            # downsample teacher_img 
-                            if self.ds_mode == 'average':
-                                teacher_img = losses.adaptive_downsample256_avg(teacher_img)
-                            else:
-                                teacher_img = losses.adaptive_downsample256(teacher_img, mode=self.ds_mode)
+                        l1_loss = self.loss_l1(gen_img, teacher_img, mask)               
                         lpips_loss = self.loss_lpips(gen_img, teacher_img, mask) 
 
                     else:

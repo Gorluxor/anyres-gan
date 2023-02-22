@@ -493,6 +493,7 @@ def training_loop(
                 print()
                 print('Aborting...')
 
+        torch.cuda.empty_cache()
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
             images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
