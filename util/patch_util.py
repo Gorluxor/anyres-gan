@@ -28,7 +28,7 @@ def construct_transformation_matrix(limits):
 
 class PatchSampler(object):
     def __init__(self, patch_size, random_shift=True, random_scale=True, scale_anneal=-1,
-                 max_scale=None, min_scale=None, use_hr=None, latent_len:int = 24, latent_spacing = 4, **kwargs):
+                 max_scale=None, min_scale=None, use_hr=None, latent_len:int = 24, use_normal:bool = False, latent_spacing = 4, **kwargs):
         self.patch_size = patch_size # variable p in paper
         self.random_shift = random_shift
         self.random_scale = random_scale
@@ -43,6 +43,7 @@ class PatchSampler(object):
         self.initial_min = 1.0 # 0.9
         self.use_hr = use_hr # ADDED
         self.latent_len = latent_len # TODO:My: parametrize this outside PatchSampler
+        self.use_normal = use_normal
 
     def sample_patch(self, im):
         im_w, im_h  = im.size
@@ -82,7 +83,10 @@ class PatchSampler(object):
         else: # no resizing, anyway, fixed size, descrite grid size
             # TODO: My: maybe consolidate it in 1 function?
             im_resized = im
-            x = random.randint(0, 12)
+            if self.use_normal: # use normal distribution on the int distribution from [0, 12] instead of uniform
+                x = max(0, min(12, round(random.normalvariate(6, 2))))
+            else:
+                x = random.randint(0, 12)
             y = random.randint(0, 12)
             params['split_range'] = (x, x+self.latent_len, y, y+self.latent_len)
             actual_coords = grid2pixel(params['split_range'], r=True)
@@ -131,6 +135,67 @@ def generate_full_from_patches(new_size, patch_size=256):
             patch_params.append(((y, y+patch_size, x, x+patch_size), transform))
     return patch_params
 
+def transform_back_to_slice(coords, img_size=1024, step_len=24, device:torch.device=None):
+    """ Transform from px slice range i.e. (0, 1024, 0, 1024) to latent space
+
+    Args:
+        coords (_type_): _description_
+        img_size (int, optional): _description_. Defaults to 1024.
+        step_len (int, optional): _description_. Defaults to 24.
+        device (torch.device, optional): If given, return tensor. Defaults to None.
+
+    Raises:
+        NotImplementedError: TODO: add other resolutions
+
+    Returns:
+        Torch.tensor | List[Tuple]: Depends on device
+    """    
+    if step_len != 24:
+        raise NotImplementedError('Implement other than 4096 and 1k')
+    if isinstance(coords, tuple):
+        coords = [coords]
+    step = img_size // 4
+    rez = [(x // step, x//step + step_len, y // step, y // step + step_len) for x, x_end, y, y_end in coords]
+    if device is not None:
+        rez = torch.tensor(rez, device=device)
+    return rez
+
+def get_list_of_slices(max_len=24, skip=4):
+    """Generate list of transforms to produce a 4k image, from 1k segments
+    Works for other resolutions, just need to change max_items, for 1k it is 28 and 
+
+    Args:
+        max_len (int, optional): _description_. Defaults to 24.
+        skip (int, optional): How many features to skip for the next box. Defaults to 4.
+    """
+    # potential_list = [((k, k + max_len, k, k + max_len)) for k in range(0, 36, skip)]
+    potential_list = []
+    for i in range(0, 36, skip):
+        for k in range(0, 36, skip):
+            if k + max_len <= 36 and i + max_len <= 36:
+                potential_list.append((k, k + max_len, i, i + max_len))
+    
+    return potential_list
+
+def get_grid_params(resolution:int = 4096):
+    """Get the grid parameters for a given resolution
+
+    Args:
+        resolution (int, optional): Resolution of the image. Defaults to 4096.
+
+    Returns:
+        list: List of tuples of the form (x, y)
+    """
+    if resolution == 4096:
+        return get_list_of_slices(24, 4)
+    elif resolution == 1024:
+        return NotImplementedError("Theoreticall need to figure out") # get_list_of_slices(28, 3)
+    else:
+        raise ValueError("Resolution not supported")
+    
+def generate_full_from_patches_slices(new_size:int):
+    return get_grid_params(new_size)
+
 def compute_scale_inputs(G, w, transform):
     if transform is None:
         scale = torch.ones(w.shape[0], 1).to(w.device)
@@ -140,26 +205,15 @@ def compute_scale_inputs(G, w, transform):
     mapped_scale = G.scale_mapping(scale, None)
     return scale, mapped_scale
 
-def scale_condition_wrapper(G, w, transform, **kwargs):
+def scale_condition_wrapper(G, w, transform, slice_range = None, **kwargs):
     # convert transformation matrix into scale input
     # and pass through scale mapping network
-    if not G.scale_mapping_kwargs:
-        img = G.synthesis(w, transform=transform, **kwargs)
+    if not G.scale_mapping_kwargs or G.scale_mapping_kwargs.scale_mapping_min == G.scale_mapping_kwargs.scale_mapping_min:
+        img = G.synthesis(w, transform=transform, slice_range=slice_range, **kwargs)
         return img
     scale, mapped_scale = compute_scale_inputs(G, w, transform)
 
-    img = G.synthesis(w, mapped_scale=mapped_scale, transform=transform, **kwargs)
-    return img
-
-
-# ADDED 
-def patch_conditional_wrapper(G, w, transform, grid_patch, **kwargs):
-    # convert transformation matrix into scale input
-    # and pass through scale mapping network
-    if not G.scale_mapping_kwargs:
-        img = G.synthesis(w, transform=transform, **kwargs)
-        return img
-    img = G.synthesis(w, grid_patch=grid_patch, transform=transform, **kwargs) # TODO: added in advance, revisit?
+    img = G.synthesis(w, mapped_scale=mapped_scale, transform=transform, slice_range=slice_range, **kwargs)
     return img
 
 def grid2pixel_old(grid_params, res=1024, increment = 256):
@@ -171,7 +225,7 @@ def grid2pixel_old(grid_params, res=1024, increment = 256):
     return [(tuple([k[0] * increment, k[0] * increment + res]), tuple([v[0] * increment, v[0] * increment + res])) for k, v in grid_params]
 
 
-def grid2pixel(grid_params, res=1024, increment = 256, r:bool = False):
+def grid2pixel(grid_params, res=1024, increment = 256, r:bool = True):
     assert grid_params is not None
     assert len(grid_params) > 0
     if isinstance(grid_params, tuple):
@@ -270,32 +324,6 @@ def generate_random_positions_tensor(num_positions:int, max_grid = 12, latent_si
     # return as list of (x_start, x_end, y_start, y_end)
     # return list(zip(x, x+latent_size, y, y+latent_size))
     return torch.stack((x, x+latent_size, y, y+latent_size), dim=1)
-# def grid2pixel(grid_params:torch.Tensor, res=1024, increment = 256) -> torch.Tensor:
-#     """ Convert from (0, 36) grid space to (0, 4096) pixel space for 4k resolution
 
-#     Args:
-#         grid_params (torch.Tensor): B x 4 or 4
-#         res (int, optional): _description_. Defaults to 1024.
-#         increment (int, optional): _description_. Defaults to 256.
-
-#     Returns:
-#         torch.Tensor: B x 4, where each row is (x_start, x_end, y_start, y_end)
-#     """    
-#     assert grid_params is not None
-#     assert isinstance(grid_params, torch.Tensor), f'{grid_params}'
-#     # B x 4 or 4 -> B x 4 or 1 x 4
-#     if grid_params.dim() == 1:
-#         grid_params = grid_params.unsqueeze(0)
-#     print(grid_params.shape)
-#     assert grid_params.shape[1] == 4, f'{grid_params}'
-#     assert torch.any(grid_params < 0, dim=1).item() == False and torch.any(grid_params > 36, dim = 1).item() == False, 'Error:Not withing grid range'
-#     # iterate over each image in the batch, and convert to pixel coords
-#     for i in range(grid_params.shape[0]):
-#         grid_params[i, 0] = grid_params[i,0] * increment  #= torch.tensor([grid_params[i, 0] * increment, grid_params[i, 0] * increment + res, grid_params[i, 1] * increment, grid_params[i, 1] * increment + res])
-#         grid_params[i, 1] = grid_params[i,0] * increment + res
-#         grid_params[i, 2] = grid_params[i,2] * increment
-#         grid_params[i, 3] = grid_params[i,2] * increment + res
-
-#     return grid_params
 
 

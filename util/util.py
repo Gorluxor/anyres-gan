@@ -82,13 +82,17 @@ def grad_with_kernel(img:torch.Tensor, kernel:str) -> torch.Tensor:
     kernel = kernel.unsqueeze(0).unsqueeze(0)
     return grad_img(img, kernel.to(device))
 
-def grad_with_all_kernels(img:torch.Tensor) -> torch.Tensor:
+def grad_with_all_kernels(img:torch.Tensor, normalize:bool = False) -> torch.Tensor:
     rez = None
     for kernel in ['tx', 'ty', 'txy']:
         if rez is None:
-            rez = grad_with_kernel(img.clone(), kernel).unsqueeze(0)
+            rez = grad_with_kernel(img.clone(), kernel) 
+            # rez = rez.unsqueeze(0) if len(rez.shape) == 3 else rez # returns already good shape
         else:
             rez = torch.cat([rez, grad_with_kernel(img.clone(), kernel)], dim=1)
+    # normalize between -1 and 1
+    if normalize:
+        rez = rez / torch.max(torch.abs(rez))
     return rez
 
 class AverageMeter(object):

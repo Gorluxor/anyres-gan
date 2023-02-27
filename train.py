@@ -205,6 +205,8 @@ def parse_comma_separated_list(s):
 @click.option('--ds_mode', help='downsampling mode', type=click.Choice(['nearest', 'bilinear', 'average', 'bicubic']), default='average', show_default=True)
 @click.option('--l2_lambda', help='l2 loss weight', metavar='FLOAT', type=click.FloatRange(min=0), default=0.0, show_default=True)
 @click.option('--use_grad', help='use grad for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--scale_grad', help="scale grad for patch training, between 0 and 1", metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--use_normal_x', help='use normal position sampling x for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
 def main(**kwargs):
 
     # Initialize config.
@@ -248,7 +250,7 @@ def main(**kwargs):
             path=opts.data_hr, resolution=opts.g_size,
             scale_min=opts.scale_min, scale_max=opts.scale_max,
             scale_anneal=opts.scale_anneal, random_crop=opts.patch_crop,
-            use_labels=True, max_size=None, xflip=False, use_hr=opts.use_hr)
+            use_labels=True, max_size=None, xflip=False, use_normal=opts.use_normal_x, use_hr=opts.use_hr)
         patch_obj = dnnlib.util.construct_class_by_name(**patch_kwargs) # gets initial args
         patch_name = patch_obj.name
         patch_kwargs.resolution = patch_obj.resolution # Be explicit about resolution.
@@ -277,6 +279,7 @@ def main(**kwargs):
             base_probability=opts.base_probability,
             use_hr=opts.use_hr, # Added
             use_grad=opts.use_grad, # Added
+            scale_grad=opts.scale_grad, # Added
             use_teached_layers = ['synthesis.L1_36_1024.down_filter', 'synthesis.L2_52_1024.up_filter', 'synthesis.L2_52_1024.down_filter', 'synthesis.L3_52_1024.down_filter', 'synthesis.L4_84_1024.up_filter', 'synthesis.L4_84_1024.down_filter', 'synthesis.L5_148_1024.down_filter', 'synthesis.L7_276_645.down_filter', 'synthesis.L8_276_406.down_filter', 'synthesis.L9_532_256.down_filter', 'synthesis.L10_1044_161.up_filter', 'synthesis.L10_1044_161.down_filter', 'synthesis.L11_1044_102.down_filter', 'synthesis.L12_1044_64.up_filter'],
             actual_resolution=opts.actual_res if opts.actual_res > 0 else opts.g_size, # Added
         )

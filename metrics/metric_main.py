@@ -101,9 +101,9 @@ def pfid(opts, minX, maxY, target_resolution=1024, num=50000, mode='patch'):
     dataset_kwargs_new.scale_max = scale_max
     dataset_kwargs_new.scale_anneal = -1
        
-    target_resolution = opts.G.init_kwargs.img_resolution
     d_opts = metric_utils.MetricOptions(G=opts.G, dataset_kwargs=dataset_kwargs_new,
                                         num_gpus=opts.num_gpus, rank=opts.rank, device=opts.device)
+    d_opts.extra = opts.extra
     
     fid = frechet_inception_distance.compute_fid_patch(
         d_opts, target_resolution, num, num, mode=mode)
@@ -137,6 +137,13 @@ def pfid2k(opts): # maybe different values for minX, maxY?
     opts.dataset_kwargs.update(max_size=None, xflip=False)
     fid = pfid(opts, minX=256, maxY=1024, target_resolution=1024, num=2000, mode='patch')
     return dict(pfid2k=fid)
+
+@register_metric
+def pfid2k_fixed(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    opts.extra.use_hr = True
+    fid = pfid(opts, minX=1024, maxY=1024, target_resolution=1024, num=2000, mode='patch')
+    return dict(pfid2k_fixed=fid)
 
 @register_metric
 def pfid2k_subpatch(opts): # maybe different values for minX, maxY?

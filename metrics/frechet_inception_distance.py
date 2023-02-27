@@ -76,7 +76,7 @@ def compute_fid_patch(opts, resolution, max_real, num_gen, mode='patch'):
     # Direct TorchScript translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
     detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
     detector_kwargs = dict(return_features=True) # Return raw features before the softmax layer.
-    assert(opts.dataset_kwargs.resolution == resolution)
+    assert(opts.dataset_kwargs.resolution == resolution), f'{opts.dataset_kwargs.resolution} vs {resolution}'
     opts.target_resolution = resolution
     assert(max_real is not None)
 
@@ -87,6 +87,7 @@ def compute_fid_patch(opts, resolution, max_real, num_gen, mode='patch'):
            rel_lo=0, rel_hi=0, capture_mean_cov=True, max_items=max_real)
         mu_real, sigma_real = stats.get_mean_cov()
         transformations = stats.get_all_transforms_torch()
+        slice_ranges = stats.get_all_ranges()
     elif mode.split('-')[0] == 'subpatch':
         stats = metric_utils.compute_feature_stats_for_dataset_patch(
            opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
@@ -99,6 +100,7 @@ def compute_fid_patch(opts, resolution, max_real, num_gen, mode='patch'):
         mu_gen, sigma_gen = metric_utils.compute_feature_stats_for_generator_patch(
             opts=opts, transformations=transformations,
             detector_url=detector_url, detector_kwargs=detector_kwargs,
+            slice_range=slice_ranges,
             rel_lo=0, rel_hi=1, capture_mean_cov=True, max_items=num_gen).get_mean_cov()
     elif mode == 'subpatch':
         mu_gen, sigma_gen = metric_utils.compute_feature_stats_for_generator_patch(

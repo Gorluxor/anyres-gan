@@ -304,6 +304,7 @@ class ImagePatchDataset(BaseImageDataset):
         scale_anneal=-1,        # annealing rate
         random_crop=True,       # add random crop for non-square images
         use_hr = False,         # To use fixed grid sampling for 4k
+        use_normal = False,     # To not use uniform, but rather normal distribution for x
         **super_kwargs,         # Additional arguments for the Dataset base class.
     ):
         assert(resolution is not None) # patch resolution must be specified
@@ -317,7 +318,7 @@ class ImagePatchDataset(BaseImageDataset):
         self.random_crop = random_crop if not use_hr else False
         self.sampler = patch_util.PatchSampler(
             patch_size=self.patch_size, scale_anneal=scale_anneal,
-            min_scale=scale_min, max_scale=scale_max, use_hr=use_hr)
+            min_scale=scale_min, max_scale=scale_max, use_normal=use_normal, use_hr=use_hr)
         self.is_patch = True
 
         super().__init__(path=path, resolution=resolution,  **super_kwargs)

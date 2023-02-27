@@ -204,6 +204,7 @@ def training_loop(
     G_ema = copy.deepcopy(G).eval()    
     if added_kwargs.use_hr:
         G.synthesis.add_reset_layers(reset_value_dict)
+        G_ema.synthesis.add_reset_layers(reset_value_dict)
     # copy G for teacher network: copy teacher G_ema to G_ema:,
     # uses G state dict for the generator to align with D
     if 'patch' in training_mode and added_kwargs.teacher is not None:
@@ -319,6 +320,7 @@ def training_loop(
             save_image_grid(images, os.path.join(run_dir, 'fakes_init.jpg'), drange=[-1,1], grid_size=grid_size)
             print('Done exporting sample images...')
             del images
+
     torch.cuda.empty_cache()
     # Initialize logs.
     if rank == 0:
@@ -504,8 +506,16 @@ def training_loop(
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
             images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
+            if added_kwargs.use_hr and added_kwargs.img_size != added_kwargs.actual_resolution:
+                # save lower res images
+                torch.cuda.empty_cache()
+                low_res, high_res = added_kwargs.img_size, added_kwargs.actual_resolution
+                G_ema.reconfigure_network(img_resolution=low_res)
+                images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+                save_image_grid(images, os.path.join(run_dir, f'fakes_lr_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
+                G_ema.reconfigure_network(img_resolution=high_res)
+                torch.cuda.empty_cache()
 
-        # Save network snapshot.
         snapshot_pkl = None
         snapshot_data = None
         if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):

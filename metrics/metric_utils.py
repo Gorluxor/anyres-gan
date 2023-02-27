@@ -78,7 +78,7 @@ def iterate_random_labels(opts, batch_size):
 #----------------------------------------------------------------------------
 
 class FeatureStats:
-    def __init__(self, capture_all=False, capture_mean_cov=False, max_items=None):
+    def __init__(self, capture_all=False, capture_mean_cov=False, max_items=None, expect_slice:bool = False):
         self.capture_all = capture_all
         self.capture_mean_cov = capture_mean_cov
         self.max_items = max_items
@@ -88,6 +88,12 @@ class FeatureStats:
         self.raw_mean = None
         self.raw_cov = None
         self.all_transforms = None
+        self.all_ranges = None
+        self.max_items_transformed = max_items
+        self.number_items_transformed = 0
+        self.max_ranges = max_items
+        self.number_ranges = 0
+        self.expect_slice = expect_slice
 
     def set_num_features(self, num_features):
         if self.num_features is not None:
@@ -99,6 +105,10 @@ class FeatureStats:
             self.raw_cov = np.zeros([num_features, num_features], dtype=np.float64)
 
     def is_full(self):
+        if self.expect_slice:
+            return (self.max_items is not None) and (self.num_items >= self.max_items) and (self.max_items_transformed is not None) \
+                    and (self.number_items_transformed >= self.max_items_transformed) and \
+                    (self.max_ranges is not None) and (self.number_ranges >= self.max_ranges)
         return (self.max_items is not None) and (self.num_items >= self.max_items)
 
     def append(self, x):
@@ -118,6 +128,30 @@ class FeatureStats:
             self.raw_mean += x64.sum(axis=0)
             self.raw_cov += x64.T @ x64
 
+    def append_trans(self, t):
+        t = np.asarray(t, dtype=np.float32)
+        assert t.ndim == 3
+        if (self.max_items_transformed is not None) and (self.number_items_transformed + t.shape[0] > self.max_items_transformed):
+            if self.number_items_transformed >= self.max_items_transformed:
+                return
+            t = t[:self.max_items_transformed - self.number_items_transformed]
+        self.number_items_transformed += t.shape[0]
+        if self.all_transforms is None:
+            self.all_transforms = []
+        self.all_transforms.append(t)
+
+    def append_slice(self, s):
+        s = np.asarray(s, dtype=np.int32)
+        assert s.ndim == 2
+        if (self.max_ranges is not None) and (self.number_ranges + s.shape[0] > self.max_ranges):
+            if self.number_ranges >= self.max_ranges:
+                return
+            s = s[:self.max_ranges - self.number_ranges]
+        self.number_ranges += s.shape[0]
+        if self.all_ranges is None:
+            self.all_ranges = []
+        self.all_ranges.append(s)
+
     def append_torch(self, x, num_gpus=1, rank=0):
         assert isinstance(x, torch.Tensor) and x.ndim == 2
         assert 0 <= rank < num_gpus
@@ -129,6 +163,30 @@ class FeatureStats:
                 ys.append(y)
             x = torch.stack(ys, dim=1).flatten(0, 1) # interleave samples
         self.append(x.cpu().numpy())
+
+    def append_torch_transform(self, x, num_gpus=1, rank=0):
+        assert isinstance(x, torch.Tensor) and x.ndim == 3
+        assert 0 <= rank < num_gpus
+        if num_gpus > 1:
+            ts = []
+            for src in range(num_gpus):
+                t = x.clone()
+                torch.distributed.broadcast(t, src=src)
+                ts.append(t)
+            x = torch.stack(ts, dim=1).flatten(0, 1)
+        self.append_trans(x.cpu().numpy())
+
+    def append_torch_slice(self, x, num_gpus=1, rank=0):
+        assert isinstance(x, torch.Tensor) and x.ndim == 2, f"{x.ndim}!= 2, expected torch.Tensor got {type(x)}"
+        assert 0 <= rank < num_gpus
+        if num_gpus > 1:
+            ss = []
+            for src in range(num_gpus):
+                s = x.clone()
+                torch.distributed.broadcast(s, src=src)
+                ss.append(s)
+            x = torch.stack(ss, dim=1).flatten(0, 1)
+        self.append_slice(x.cpu().numpy())
 
     def get_all(self):
         assert self.capture_all
@@ -155,11 +213,20 @@ class FeatureStats:
             self.all_transforms = []
         self.all_transforms.append(x)
 
+    def get_all_ranges(self):
+        assert self.all_ranges is not None
+        slices = np.concatenate(self.all_ranges, axis=0)
+        slices = torch.from_numpy(slices).int() # make sure it is indexes
+        assert(slices.shape[0] >= self.max_ranges)
+        # check if dtype is int
+        assert(slices.dtype == torch.int32), f"Incorrect dtype, expected int, got {slices.dtype}, original_type {self.all_ranges[0].dtype}"
+        return slices[:self.max_ranges]
+
     def get_all_transforms_torch(self):
         transforms = np.concatenate(self.all_transforms, axis=0)
         transforms = torch.from_numpy(transforms)
-        assert(transforms.shape[0] >= self.max_items)
-        return transforms[:self.max_items]
+        assert(transforms.shape[0] >= self.max_items_transformed)
+        return transforms[:self.max_items_transformed]
 
     def save(self, pkl_file):
         with open(pkl_file, 'wb') as f:
@@ -352,10 +419,10 @@ def compute_feature_stats_for_dataset_patch(opts, detector_url, detector_kwargs,
 
     # Initialize.
     assert(max_items is not None)
-    assert(opts.num_gpus == 1)
-    assert(opts.rank == 0)
+    # assert(opts.num_gpus == 1) 
+    # assert(opts.rank == 0)
     num_items = max_items
-    stats = FeatureStats(max_items=num_items, **stats_kwargs)
+    stats = FeatureStats(max_items=num_items, expect_slice=True, **stats_kwargs)
     progress = opts.progress.sub(tag='dataset features', num_items=num_items, rel_lo=rel_lo, rel_hi=rel_hi)
     detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
 
@@ -366,8 +433,11 @@ def compute_feature_stats_for_dataset_patch(opts, detector_url, detector_kwargs,
     iterator = iter(torch.utils.data.DataLoader(
         dataset=dataset, sampler=sampler, batch_size=batch_size, **data_loader_kwargs))
 
-    num_batches = math.ceil(max_items / batch_size)
-    for _ in tqdm(range(num_batches)):
+    num_batches_total = math.ceil(max_items / batch_size)
+    num_batches = num_batches_total // opts.num_gpus
+    # counter_limit = stats.max_items // opts.num_gpus # not used as loader already handles this
+    #counter = opts.rank * counter_limit 
+    for _ in tqdm(range(num_batches), disable=True if opts.num_gpus > 0 else False):
         data, _labels = next(iterator)
         images = data['image']
         if images.shape[1] == 1:
@@ -385,16 +455,21 @@ def compute_feature_stats_for_dataset_patch(opts, detector_url, detector_kwargs,
                 transform[i, 2, 1] = x
             crops = torch.stack(crops)
             features = detector(crops.to(opts.device), **detector_kwargs)
+            # stats.append_split_range(data['params']['split_range']) # TODO: would need to change sampling up there, for subpatch to work
             stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
             stats.append_transform(transform)
         else:
             features = detector(images.to(opts.device), **detector_kwargs)
             stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
-            stats.append_transform(data['params']['transform'])
+            curr_slice = torch.stack(data['params']['split_range']).permute(1,0)
+            stats.append_torch_slice(curr_slice.to(opts.device), num_gpus=opts.num_gpus, rank=opts.rank)
+            stats.append_torch_transform(data['params']['transform'].to(opts.device), num_gpus=opts.num_gpus, rank=opts.rank)
         progress.update(stats.num_items)
         if stats.is_full():
             break
-    assert(stats.is_full())
+    if opts.num_gpus > 1:
+        torch.distributed.barrier()
+    assert(stats.is_full()), f"is not full: {stats.num_items=}, {stats.max_items=} | {stats.number_ranges} vs {stats.max_ranges=} | {stats.number_items_transformed} vs {stats.max_items_transformed=}"
 
     # Save to cache.
     if cache_file is not None and opts.rank == 0:
@@ -481,8 +556,10 @@ def compute_feature_stats_for_generator_full(opts, detector_url, detector_kwargs
     from util.patch_util import generate_full_from_patches
     patches = generate_full_from_patches(target_resolution, G.img_resolution)
     assert(opts.G_kwargs == {}) # sanity check
-
+    from util.patch_util import transform_back_to_slice
     # Main loop.
+    if opts.extra.get('use_hr', False):
+        assert opts.G._init_kwargs['actual_resolution'] * 4 == opts.G._init_kwargs['img_resolution']
     num_batches = math.ceil(stats.max_items / batch_size)
     for _ in tqdm(range(num_batches)):
         images = []
@@ -491,8 +568,12 @@ def compute_feature_stats_for_generator_full(opts, detector_url, detector_kwargs
             ws = G.mapping(z=z, c=next(c_iter), **opts.G_kwargs)
             full = torch.zeros((batch_gen, G.img_channels, target_resolution, target_resolution), device=opts.device)
             for bbox, transform in patches:
-                transform = transform.repeat(batch_gen, 1, 1).cuda()
-                img = patch_util.scale_condition_wrapper(G, ws, transform, **opts.G_kwargs)
+                if opts.extra.get('use_hr', False):
+                    # reverse transform cordinates to slice's and make transform eye
+                    slice_range = transform_back_to_slice(bbox, img_size=opts.G.actual_resolution)
+                    transform = torch.eye(3, device=opts.device)
+                transform = transform.repeat(batch_gen, 1, 1).to(opts.device)
+                img = patch_util.scale_condition_wrapper(G, ws, transform, slice_range=slice_range, **opts.G_kwargs)
                 full[:, :, bbox[0]:bbox[1], bbox[2]:bbox[3]] = img
             img = full
             img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
@@ -559,7 +640,7 @@ def compute_feature_stats_for_generator_up(opts, detector_url, detector_kwargs, 
 
 # generates individual patches for pFID
 def compute_feature_stats_for_generator_patch(opts, transformations, detector_url, detector_kwargs,
-                                              is_subpatch=False, rel_lo=0, rel_hi=1, batch_size=64, batch_gen=None, **stats_kwargs):
+                                              slice_range = None, is_subpatch=False, rel_lo=0, rel_hi=1, batch_size=64, batch_gen=None, **stats_kwargs):
     # assert(opts.num_gpus == 1)
     # assert(opts.rank == 0)
     if batch_gen is None:
@@ -580,6 +661,8 @@ def compute_feature_stats_for_generator_patch(opts, transformations, detector_ur
     # Main loop.
     num_batches_total = math.ceil(stats.max_items / batch_size)
     assert(transformations.shape[0] % batch_gen == 0)
+    if slice_range is not None:
+        assert (slice_range.shape[0] % batch_gen == 0) # sanity check
     num_batches = num_batches_total // opts.num_gpus
     counter_limit = stats.max_items // opts.num_gpus
     counter = opts.rank * counter_limit 
@@ -597,6 +680,7 @@ def compute_feature_stats_for_generator_patch(opts, transformations, detector_ur
                 break # no more work for this GPU
             transform = transformations[counter:counter+batch_gen]
             transform = transform.to(opts.device)
+            slice_info = slice_range[counter:counter+batch_gen].to(opts.device) if slice_range is not None else None
             counter += batch_gen
             if is_subpatch:
                 # extract crop locations from transform, reset the transform,
@@ -613,7 +697,7 @@ def compute_feature_stats_for_generator_patch(opts, transformations, detector_ur
                 crops = torch.stack(crops)
                 img = crops
             else:
-                img = patch_util.scale_condition_wrapper(G, ws, transform, **opts.G_kwargs)
+                img = patch_util.scale_condition_wrapper(G, ws, transform, slice_range=slice_info, **opts.G_kwargs)
             img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             images.append(img)
         images = torch.cat(images)
