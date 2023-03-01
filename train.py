@@ -151,6 +151,7 @@ def parse_comma_separated_list(s):
 @click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
 @click.option('--freezed',      help='Freeze first layers of D', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
 
+@click.option('--freezedG',     help='Freeze first layers of G', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
 # Misc hyperparameters.
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
 @click.option('--target',       help='Target value for --aug=ada', metavar='FLOAT',             type=click.FloatRange(min=0, max=1), default=0.6, show_default=True)
@@ -207,6 +208,9 @@ def parse_comma_separated_list(s):
 @click.option('--use_grad', help='use grad for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--scale_grad', help="scale grad for patch training, between 0 and 1", metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--use_normal_x', help='use normal position sampling x for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--use_old_filters', help='use old compatible filters, else just use 4k ones', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--log_HR', help='log HR 1 Forward Pass images', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--log_LR', help='log LR reconfigured forward pass images', metavar='BOOL', type=bool, default=False, show_default=True)
 def main(**kwargs):
 
     # Initialize config.
@@ -282,6 +286,10 @@ def main(**kwargs):
             scale_grad=opts.scale_grad, # Added
             use_teached_layers = ['synthesis.L1_36_1024.down_filter', 'synthesis.L2_52_1024.up_filter', 'synthesis.L2_52_1024.down_filter', 'synthesis.L3_52_1024.down_filter', 'synthesis.L4_84_1024.up_filter', 'synthesis.L4_84_1024.down_filter', 'synthesis.L5_148_1024.down_filter', 'synthesis.L7_276_645.down_filter', 'synthesis.L8_276_406.down_filter', 'synthesis.L9_532_256.down_filter', 'synthesis.L10_1044_161.up_filter', 'synthesis.L10_1044_161.down_filter', 'synthesis.L11_1044_102.down_filter', 'synthesis.L12_1044_64.up_filter'],
             actual_resolution=opts.actual_res if opts.actual_res > 0 else opts.g_size, # Added
+            use_normal=opts.use_normal_x, # Added, though mainly used in PatchTrainingKwargs
+            use_old_filters=opts.use_old_filters, # Added
+            log_HR=opts.log_HR, # Added
+            log_LR=opts.log_LR, # Added
         )
         if opts.use_hr:
             c.G_kwargs.use_scale_affine = False # TODO:for now disable scaling totally

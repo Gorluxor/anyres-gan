@@ -723,7 +723,7 @@ class SynthesisNetwork(torch.nn.Module):
         # print(f"{cutoffs=}")
         return channels, sizes, sampling_rates, cutoffs, half_widths
 
-    def reconfigure_network(self, img_resolution, channel_base = 32768 * 2, channel_max= 1024): # Added
+    def reconfigure_network(self, img_resolution, channel_base = 32768 * 2, channel_max= 1024, use_old_filters:bool = True): # Added
         channels, sizes, sampling_rates, cutoffs, half_widths = self.compute_stuff_for_resolution(img_resolution, channel_base, channel_max)
         channels_1k, sizes_1k, sampling_rates_1k, cutoffs_1k, half_widths_1k = self.compute_stuff_for_resolution(1024, channel_base, channel_max)
         # reconfigure input (size, sampling rate and bandwidth)
@@ -744,7 +744,7 @@ class SynthesisNetwork(torch.nn.Module):
                 in_sampling_rate=int(sampling_rates[prev]), out_sampling_rate=int(sampling_rates[idx]),
                 in_half_width=half_widths[prev], out_half_width=half_widths[idx], use_fp16=use_fp16, is_critically_sampled=is_critically_sampled
                 )
-        if self.reconfigure_back_layers:
+        if self.reconfigure_back_layers and use_old_filters:
             device = self.input.transform.device
             for k, v in self.reconfigure_back_layers.items():
                 key = k.replace('synthesis.',"")
@@ -867,11 +867,11 @@ class Generator(torch.nn.Module):
         img = self.synthesis(ws, mapped_scale=mapped_scale, slice_range=slice_range, transform=transform, update_emas=update_emas, **synthesis_kwargs)
         return img
 
-    def reconfigure_network(self, img_resolution, channel_base:int = 32768* 2, channel_max:int = 1024):
+    def reconfigure_network(self, img_resolution, channel_base:int = 32768* 2, channel_max:int = 1024, use_old_filters:bool = False):
         #print(f'Reconfiguring network from with params {img_resolution} and {channel_base} and {channel_max}')
         #print(f'Previous params are {self.img_resolution} and {self.synthesis.channel_base} and {self.synthesis.channel_max}')
         self.img_resolution = img_resolution
-        self.synthesis.reconfigure_network(img_resolution=img_resolution, channel_base=channel_base)
+        self.synthesis.reconfigure_network(img_resolution=img_resolution, channel_base=channel_base, use_old_filters=use_old_filters)
 
 #----------------------------------------------------------------------------
 @persistence.persistent_class

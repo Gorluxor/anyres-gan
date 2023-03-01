@@ -193,8 +193,28 @@ def get_grid_params(resolution:int = 4096):
     else:
         raise ValueError("Resolution not supported")
     
-def generate_full_from_patches_slices(new_size:int):
-    return get_grid_params(new_size)
+def generate_full_from_patches_slices(new_size:int, device:torch.device=None):
+    rez = get_grid_params(new_size)
+    if device is not None:
+        rez = torch.tensor(rez, device=device)
+    return rez
+
+import einops
+def reconstruct_image_from_patches(img:torch.Tensor, hs=4, ws=4) -> torch.Tensor:
+    """Reverse of einops.rearrange(img, '... c (hs h) (ws w) -> ... c (hs ws) h w  ', hs=4, ws=4)
+
+    Args:
+        img (torch.Tensor): tensor of shape (batch, n, channels, height, width) or (n, channels, height, width)
+        hs (int, optional): grid split height. Defaults to 4.
+        ws (int, optional): grid split width. Defaults to 4.
+
+    Returns:
+        torch.Tensor: (B, C, H*hs, W*ws)
+    """    
+    # batch_second = hs * ws != img.shape[-3]
+    # if batch_second:
+    return einops.rearrange(img, '(ws hs) b c h w -> b c (hs h) (ws w) ', hs=hs, ws=ws)
+    # return einops.rearrange(img, 'b n c (hs ws) h w -> b c (hs h) (ws w)', hs=hs, ws=ws)
 
 def compute_scale_inputs(G, w, transform):
     if transform is None:

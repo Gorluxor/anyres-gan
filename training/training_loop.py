@@ -30,7 +30,8 @@ from util import util
 from util import patch_util
 import random
 from metrics import equivariance
-
+from torchvision.transforms import functional as F_tv
+from torchvision.transforms import InterpolationMode
 #----------------------------------------------------------------------------
 
 def setup_snapshot_image_grid(training_set, random_seed=0):
@@ -72,7 +73,7 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
 
 #----------------------------------------------------------------------------
 
-def save_image_grid(img, fname, drange, grid_size):
+def save_image_grid(img, fname, drange, grid_size, q:int = 85):
     lo, hi = drange
     img = np.asarray(img, dtype=np.float32)
     img = (img - lo) * (255 / (hi - lo))
@@ -85,7 +86,7 @@ def save_image_grid(img, fname, drange, grid_size):
     img = img.reshape([gh * H, gw * W, C])
 
     # check if fname has .jpg extension and set quality to 85 
-    extra_args = dict(quality=85) if fname.endswith('.jpg') else {}
+    extra_args = dict(quality=q) if fname.endswith('.jpg') else {}
     assert C in [1, 3]
     if C == 1:
         PIL.Image.fromarray(img[:, :, 0], 'L').save(fname, **extra_args)
@@ -223,7 +224,9 @@ def training_loop(
             # util.set_requires_grad(False, teacher)
     else:
         teacher = None
-
+    G.reconfigure_network(img_resolution=added_kwargs.actual_resolution, use_old_filters=added_kwargs.use_old_filters)
+    G_ema.reconfigure_network(img_resolution=added_kwargs.actual_resolution, use_old_filters=added_kwargs.use_old_filters)
+    already_done = False # just for teacher images
     # Resume from existing pickle.
     if (resume_pkl is not None) and (rank == 0):
         print(f'Resuming from "{resume_pkl}"')
@@ -504,18 +507,37 @@ def training_loop(
         torch.cuda.empty_cache()
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
+            if not added_kwargs.use_hr or added_kwargs.log_HR:
+                images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+                save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
             if added_kwargs.use_hr and added_kwargs.img_size != added_kwargs.actual_resolution:
                 # save lower res images
                 torch.cuda.empty_cache()
                 low_res, high_res = added_kwargs.img_size, added_kwargs.actual_resolution
-                G_ema.reconfigure_network(img_resolution=low_res)
-                images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-                save_image_grid(images, os.path.join(run_dir, f'fakes_lr_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
-                G_ema.reconfigure_network(img_resolution=high_res)
-                torch.cuda.empty_cache()
+                if added_kwargs.log_LR:
+                    G_ema.reconfigure_network(img_resolution=low_res, use_old_filters=added_kwargs.use_old_filters)
+                    images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+                    save_image_grid(images, os.path.join(run_dir, f'fakes_lr_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
+                    G_ema.reconfigure_network(img_resolution=high_res, use_old_filters=added_kwargs.use_old_filters)
+                    torch.cuda.empty_cache()
+                
+                slice_ranges_4k = patch_util.generate_full_from_patches_slices(high_res, device=device)
+                images = patch_util.reconstruct_image_from_patches(torch.stack([torch.cat([G_ema(z=z, c=c, noise_mode='const', slice_range=sl.repeat(batch_gpu, 1)).cpu() for z, c in zip(grid_z, grid_c)]) for sl in slice_ranges_4k]))
+                save_image_grid(images, os.path.join(run_dir, f'fakes_hr_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
+                # functional interpolate with bilinear
+                images = F_tv.resize(images, (low_res, low_res), interpolation=InterpolationMode.BILINEAR)
+                save_image_grid(images, os.path.join(run_dir, f'fakes_hrds_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)    
 
+            # also save 1k images with teacher model
+            if added_kwargs.teacher is not None and not already_done:
+                images = torch.cat([teacher(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+                save_image_grid(images, os.path.join(run_dir, f'fakes_teacher.jpg'), drange=[-1,1], grid_size=grid_size)
+                already_done = True
+            del images
+            torch.cuda.empty_cache()
+
+        # if num_gpus > 1:
+        #     torch.distributed.barrier()
         snapshot_pkl = None
         snapshot_data = None
         if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):
