@@ -77,7 +77,7 @@ def grad_with_kernel(img:torch.Tensor, kernel:str) -> torch.Tensor:
     elif kernel == 'ty':
         kernel = torch.tensor([[1, 1, 1], [0, 0, 0], [-1, -1, -1]], dtype=torch.float32)
     elif kernel == 'txy':
-        kernel = torch.tensor([[1, 0, -1], [0, 0, 0], [-1, 0, 1]], dtype=torch.float32) # diagonal gradient txy
+        kernel = torch.tensor([[0, 0, 1], [0, 0, 0], [-1, 0, 0]], dtype=torch.float32) # diagonal gradient txy
     device = img.device if hasattr(img, 'device') else torch.device('cpu')
     kernel = kernel.unsqueeze(0).unsqueeze(0)
     return grad_img(img, kernel.to(device))

@@ -209,8 +209,8 @@ def parse_comma_separated_list(s):
 @click.option('--scale_grad', help="scale grad for patch training, between 0 and 1", metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--use_normal_x', help='use normal position sampling x for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--use_old_filters', help='use old compatible filters, else just use 4k ones', metavar='BOOL', type=bool, default=False, show_default=True)
-@click.option('--log_HR', help='log HR 1 Forward Pass images', metavar='BOOL', type=bool, default=False, show_default=True)
-@click.option('--log_LR', help='log LR reconfigured forward pass images', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--log_hr', help='log HR 1 Forward Pass images', is_flag=True, default=False)
+@click.option('--log_lr', help='log LR reconfigured forward pass images', is_flag=True, default=False)
 def main(**kwargs):
 
     # Initialize config.
@@ -288,8 +288,8 @@ def main(**kwargs):
             actual_resolution=opts.actual_res if opts.actual_res > 0 else opts.g_size, # Added
             use_normal=opts.use_normal_x, # Added, though mainly used in PatchTrainingKwargs
             use_old_filters=opts.use_old_filters, # Added
-            log_HR=opts.log_HR, # Added
-            log_LR=opts.log_LR, # Added
+            log_HR=opts.log_hr, # Added
+            log_LR=opts.log_lr, # Added
         )
         if opts.use_hr:
             c.G_kwargs.use_scale_affine = False # TODO:for now disable scaling totally
