@@ -28,3 +28,5 @@ outputs/*
 sh/*
 test*/*
 .vscode/launch.json
+wandb/*
+paths.txt

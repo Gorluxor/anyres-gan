@@ -338,6 +338,13 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
     return stats
 
 #----------------------------------------------------------------------------
+from torchvision.transforms.functional import resize, InterpolationMode
+def generate_downsampled_patches(G, z, c, device, G_kwargs):
+    """Generate images with slice patches and compile them back
+    """
+    slice_ranges_4k = patch_util.generate_full_from_patches_slices(G.img_resolution, device=device)
+    batch_size = z.shape[0] # same as batch_gen
+    return resize(patch_util.reconstruct_image_from_patches(torch.stack([torch.cat([G(z=z, c=c, slice_range=sl.repeat(batch_size, 1), **G_kwargs)]) for sl in slice_ranges_4k])), (G.actual_resolution, G.actual_resolution), interpolation=InterpolationMode.BILINEAR)
 
 def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel_lo=0, rel_hi=1, batch_size=64, batch_gen=None, **stats_kwargs):
     if batch_gen is None:
@@ -354,14 +361,18 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
     assert stats.max_items is not None
     progress = opts.progress.sub(tag='generator features', num_items=stats.max_items, rel_lo=rel_lo, rel_hi=rel_hi)
     detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
-
+    use_ds = opts.extra.get('use_ds', False)
     # Main loop.
     while not stats.is_full():
         images = []
         for _i in range(batch_size // batch_gen):
             z = torch.randn([batch_gen, G.z_dim], device=opts.device)
-            img = G(z=z, c=next(c_iter), **opts.G_kwargs)
+            c = next(c_iter)
+            img = G(z=z, c=c, **opts.G_kwargs) if not use_ds else generate_downsampled_patches(G, z, c, opts.device, opts.G_kwargs)
             img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            # if _i == 0 and opts.rank == 0:
+            #     import PIL
+            #     PIL.Image.fromarray(np.transpose(img[0].clone().cpu().numpy(), (1,2,0)), 'RGB').save('testa/DS_FID.png')
             images.append(img)
         images = torch.cat(images)
         if images.shape[1] == 1:

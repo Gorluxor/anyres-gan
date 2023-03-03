@@ -219,11 +219,16 @@ def training_loop(
             with dnnlib.util.open_url(added_kwargs.teacher) as f:
                 teacher_data = legacy.load_network_pkl(f)
             for name, module in [('G', G), ('G_ema', teacher), ('G_ema', G_ema), ('D', D)]:
+                if added_kwargs.reinitd and name == 'D': # skip copying discriminator
+                    continue
                 misc.copy_params_and_buffers(teacher_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
             print(f"done loading teacher on device %s! " % rank)
             # util.set_requires_grad(False, teacher)
     else:
         teacher = None
+    
+    if teacher is not None:
+        teacher.synthesis.remove_all_delta_weights(rank)
     G.reconfigure_network(img_resolution=added_kwargs.actual_resolution, use_old_filters=added_kwargs.use_old_filters)
     G_ema.reconfigure_network(img_resolution=added_kwargs.actual_resolution, use_old_filters=added_kwargs.use_old_filters)
     already_done = False # just for teacher images
@@ -343,6 +348,8 @@ def training_loop(
     if rank == 0:
         print(f'Training for {total_kimg} kimg...')
         print()
+    if rank == 0:
+        print(f"Model:{str(G)}")
     cur_nimg = resume_kimg * 1000
     cur_tick = 0
     tick_start_nimg = cur_nimg
@@ -428,7 +435,8 @@ def training_loop(
                                           gen_z=gen_z, gen_c=gen_c, gain=phase.interval, cur_nimg=cur_nimg,
                                           min_scale=min_scale, max_scale=max_scale, split=curr_split, coords=curr_coords)
             phase.module.requires_grad_(False)
-
+            if added_kwargs.use_grad_clip:
+                torch.nn.utils.clip_grad_norm_(phase.module.parameters(), 1.0)
             # Update weights.
             with torch.autograd.profiler.record_function(phase.name + '_opt'):
                 params = [param for param in phase.module.parameters() if param.grad is not None]

@@ -151,7 +151,6 @@ def parse_comma_separated_list(s):
 @click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
 @click.option('--freezed',      help='Freeze first layers of D', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
 
-@click.option('--freezedG',     help='Freeze first layers of G', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
 # Misc hyperparameters.
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
 @click.option('--target',       help='Target value for --aug=ada', metavar='FLOAT',             type=click.FloatRange(min=0, max=1), default=0.6, show_default=True)
@@ -211,12 +210,16 @@ def parse_comma_separated_list(s):
 @click.option('--use_old_filters', help='use old compatible filters, else just use 4k ones', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--log_hr', help='log HR 1 Forward Pass images', is_flag=True, default=False)
 @click.option('--log_lr', help='log LR reconfigured forward pass images', is_flag=True, default=False)
+@click.option('--use_grad_clip', help='use grad clip for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--reinitd', help='reinit Discriminator', metavar='FLOAT', is_flag=True, default=False)
+@click.option('--freezeg', help='Freeze first layers of G', metavar='INT', type=click.IntRange(min=0), default=0, show_default=True)
+@click.option('--deltag', help='Delta G', metavar='FLOAT', type=click.IntRange(min=0), default=0.0, show_default=True)
 def main(**kwargs):
 
     # Initialize config.
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
     c = dnnlib.EasyDict() # Main config dict.
-    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
+    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), freezeG=opts.freezeg, deltaG=opts.deltag)
     c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8, weight_decay=opts.l2_lambda)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8, weight_decay=opts.l2_lambda)
@@ -290,6 +293,8 @@ def main(**kwargs):
             use_old_filters=opts.use_old_filters, # Added
             log_HR=opts.log_hr, # Added
             log_LR=opts.log_lr, # Added
+            use_grad_clip = opts.use_grad_clip, # Added
+            reinitd = opts.reinitd, # Added
         )
         if opts.use_hr:
             c.G_kwargs.use_scale_affine = False # TODO:for now disable scaling totally

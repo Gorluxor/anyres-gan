@@ -77,20 +77,36 @@ class FullyConnectedLayer(torch.nn.Module):
         lr_multiplier   = 1,        # Learning rate multiplier.
         weight_init     = 1,        # Initial standard deviation of the weight tensor.
         bias_init       = 0,        # Initial value of the additive bias.
+        frozen          = False,    # Whether to freeze the layer.
+        use_delta       = False,    # Whether to use delta weights
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.activation = activation
-        self.weight = torch.nn.Parameter(torch.randn([out_features, in_features]) * (weight_init / lr_multiplier))
-        bias_init = np.broadcast_to(np.asarray(bias_init, dtype=np.float32), [out_features])
-        self.bias = torch.nn.Parameter(torch.from_numpy(bias_init / lr_multiplier)) if bias else None
+        if not frozen:
+            self.weight = torch.nn.Parameter(torch.randn([out_features, in_features]) * (weight_init / lr_multiplier))
+            bias_init = np.broadcast_to(np.asarray(bias_init, dtype=np.float32), [out_features])
+            self.bias = torch.nn.Parameter(torch.from_numpy(bias_init / lr_multiplier)) if bias else None
+        else:
+            self.register_buffer('weight', torch.randn([out_features, in_features]) * (weight_init / lr_multiplier))
+            bias_init = np.broadcast_to(np.asarray(bias_init, dtype=np.float32), [out_features])
+            self.register_buffer('bias', torch.from_numpy(bias_init / lr_multiplier)) if bias else None
         self.weight_gain = lr_multiplier / np.sqrt(in_features)
         self.bias_gain = lr_multiplier
+        self.use_delta = use_delta
+        if use_delta:
+            self.weight_delta = torch.nn.Parameter(torch.zeros([out_features, in_features]))
+            self.bias_delta = torch.nn.Parameter(torch.zeros([out_features])) if bias else None
+    
+    def remove_delta_weights(self):
+        self.use_delta = False
+        self.weight_delta = None
+        self.bias_delta = None
 
     def forward(self, x):
-        w = self.weight.to(x.dtype) * self.weight_gain
-        b = self.bias
+        w = self.weight.to(x.dtype) * self.weight_gain if not self.use_delta else self.weight.to(x.dtype) * self.weight_gain + self.weight_delta.to(x.dtype)
+        b = self.bias if not self.use_delta else self.bias + self.bias_delta
         if b is not None:
             b = b.to(x.dtype)
             if self.bias_gain != 1:
@@ -103,7 +119,7 @@ class FullyConnectedLayer(torch.nn.Module):
         return x
 
     def extra_repr(self):
-        return f'in_features={self.in_features:d}, out_features={self.out_features:d}, activation={self.activation:s}'
+        return f'in_features={self.in_features:d}, out_features={self.out_features:d}, activation={self.activation:s}, use_delta={self.use_delta}'
 
 #----------------------------------------------------------------------------
 
@@ -117,6 +133,7 @@ class MappingNetwork(torch.nn.Module):
         num_layers      = 2,        # Number of mapping layers.
         lr_multiplier   = 0.01,     # Learning rate multiplier for the mapping layers.
         w_avg_beta      = 0.998,    # Decay for tracking the moving average of W during training.
+        frozen          = False,    # Whether to freeze the mapping layers.
     ):
         super().__init__()
         self.z_dim = z_dim
@@ -127,10 +144,10 @@ class MappingNetwork(torch.nn.Module):
         self.w_avg_beta = w_avg_beta
 
         # Construct layers.
-        self.embed = FullyConnectedLayer(self.c_dim, self.w_dim) if self.c_dim > 0 else None
+        self.embed = FullyConnectedLayer(self.c_dim, self.w_dim, frozen=frozen) if self.c_dim > 0 else None
         features = [self.z_dim + (self.w_dim if self.c_dim > 0 else 0)] + [self.w_dim] * self.num_layers
         for idx, in_features, out_features in zip(range(num_layers), features[:-1], features[1:]):
-            layer = FullyConnectedLayer(in_features, out_features, activation='lrelu', lr_multiplier=lr_multiplier)
+            layer = FullyConnectedLayer(in_features, out_features, activation='lrelu', lr_multiplier=lr_multiplier, frozen=frozen)
             setattr(self, f'fc{idx}', layer)
         self.register_buffer('w_avg', torch.zeros([w_dim]))
 
@@ -176,6 +193,8 @@ class SynthesisInput(torch.nn.Module):
         sampling_rate,  # Output sampling rate.
         bandwidth,      # Output bandwidth.
         margin_size,    # Extra margin on input.
+        frozen = False, # Whether to freeze the parameters.
+        delta  = False, # Whether to use delta parameters.
     ):
         super().__init__()
         self.w_dim = w_dim
@@ -193,8 +212,11 @@ class SynthesisInput(torch.nn.Module):
         phases = torch.rand([self.channels]) - 0.5
 
         # Setup parameters and buffers.
-        self.weight = torch.nn.Parameter(torch.randn([self.channels, self.channels]))
-        self.affine = FullyConnectedLayer(w_dim, 4, weight_init=0, bias_init=[1,0,0,0])
+        if not frozen:
+            self.weight = torch.nn.Parameter(torch.randn([self.channels, self.channels]))
+        else:
+            self.register_buffer('weight', torch.randn([self.channels, self.channels]))
+        self.affine = FullyConnectedLayer(w_dim, 4, weight_init=0, bias_init=[1,0,0,0], frozen=frozen)
         self.register_buffer('transform', torch.eye(3, 3)) # User-specified inverse transform wrt. resulting image.
         self.register_buffer('freqs', freqs)
         self.register_buffer('phases', phases)
@@ -424,7 +446,9 @@ class SynthesisLayer(torch.nn.Module):
         magnitude_ema_beta  = 0.999,    # Decay rate for the moving average of input magnitudes. 
 
         # added
-        use_scale_affine = False
+        use_scale_affine    = False,
+        frozen              = False,    # Freeze the weights?
+        delta               = False,    # Whether to use delta weights on the affine layer (style)
     ):
         super().__init__()
         self.lrelu_upsampling = lrelu_upsampling # added so recofig can be used
@@ -448,11 +472,16 @@ class SynthesisLayer(torch.nn.Module):
         self.conv_kernel = 1 if is_torgb else conv_kernel
         self.conv_clamp = conv_clamp
         self.magnitude_ema_beta = magnitude_ema_beta
-
+        self.frozen = frozen
+        self.delta = delta
         # Setup parameters and buffers.
-        self.affine = FullyConnectedLayer(self.w_dim, self.in_channels, bias_init=1)
-        self.weight = torch.nn.Parameter(torch.randn([self.out_channels, self.in_channels, self.conv_kernel, self.conv_kernel]))
-        self.bias = torch.nn.Parameter(torch.zeros([self.out_channels]))
+        self.affine = FullyConnectedLayer(self.w_dim, self.in_channels, bias_init=1, frozen=frozen, use_delta=delta)
+        if frozen:
+            self.weight = torch.nn.Parameter(torch.randn([self.out_channels, self.in_channels, self.conv_kernel, self.conv_kernel]))
+            self.bias = torch.nn.Parameter(torch.zeros([self.out_channels]))
+        else:
+            self.register_buffer('weight', torch.randn([self.out_channels, self.in_channels, self.conv_kernel, self.conv_kernel]))
+            self.register_buffer('bias', torch.zeros([self.out_channels]))
         self.register_buffer('magnitude_ema', torch.ones([]))
 
         # Design upsampling filter.
@@ -612,7 +641,7 @@ class SynthesisLayer(torch.nn.Module):
             f'in_cutoff={self.in_cutoff:g}, out_cutoff={self.out_cutoff:g},',
             f'in_half_width={self.in_half_width:g}, out_half_width={self.out_half_width:g},',
             f'in_size={list(self.in_size)}, out_size={list(self.out_size)},',
-            f'in_channels={self.in_channels:d}, out_channels={self.out_channels:d}'])
+            f'in_channels={self.in_channels:d}, out_channels={self.out_channels:d}, frozen={self.frozen}, delta={self.delta}'])
 
 #----------------------------------------------------------------------------
 
@@ -635,6 +664,8 @@ class SynthesisNetwork(torch.nn.Module):
         training_mode       = 'global', # training mode for input layer
         fov                 = None,     # Specify FOV for 360 model
         actual_resolution   = 1024,     # Specify actual resolution for size calculation
+        freezeG             = 0,        # freeze N layers of generator
+        deltaG              = 0,        # use delta weight for affine of last N layers of generator, also free them if so
         **layer_kwargs,                 # Arguments for SynthesisLayer.
     ):
         super().__init__()
@@ -668,12 +699,21 @@ class SynthesisNetwork(torch.nn.Module):
         channels, sizes, sampling_rates, cutoffs, half_widths = self.compute_stuff_for_resolution(img_resolution, channel_base, channel_max)
         channels_1k, sizes_1k, sampling_rates_1k, cutoffs_1k, half_widths_1k = self.compute_stuff_for_resolution(actual_resolution, channel_base, channel_max)
 
+        def trainable_gen(num, max_items, rev=False):
+            items = [1 if i < num else 0 for i in range(max_items + 1)] 
+            items = items if not rev else reversed(items)
+            for i in items:
+                yield i == 1
+            raise ValueError('too many items requested')
+        
+        frozen_iter = trainable_gen(freezeG, num_layers)
+        delta_iter = trainable_gen(deltaG, num_layers, True)
         # Construct layers.
         if '360' not in training_mode:
             self.input = SynthesisInput(
                 w_dim=self.w_dim, channels=int(channels[0]), size=int(sizes[0]),
                 sampling_rate=sampling_rates[0], bandwidth=cutoffs[0],
-                margin_size=margin_size)
+                margin_size=margin_size, frozen=freezeG > 0)
         else:
             assert(fov is not None)
             self.input = SynthesisInput360(
@@ -686,6 +726,8 @@ class SynthesisNetwork(torch.nn.Module):
             is_torgb = (idx == self.num_layers)
             is_critically_sampled = (idx >= self.num_layers - self.num_critical)
             use_fp16 = (sampling_rates[idx] * (2 ** self.num_fp16_res) > self.img_resolution)
+            delta, frozen = next(delta_iter), next(frozen_iter)
+            frozen = frozen or delta
             if actual_resolution != img_resolution: # Added
                 print(f'Reminder: using all at {img_resolution} except in_channels={int(channels_1k[prev])} and out_channels={int(channels_1k[idx])}')
             layer = SynthesisLayer( # changed in_channels to reflex 1k always
@@ -694,12 +736,19 @@ class SynthesisNetwork(torch.nn.Module):
                 in_size=int(sizes[prev]), out_size=int(sizes[idx]),
                 in_sampling_rate=int(sampling_rates[prev]), out_sampling_rate=int(sampling_rates[idx]),
                 in_cutoff=cutoffs[prev], out_cutoff=cutoffs[idx],
-                in_half_width=half_widths[prev], out_half_width=half_widths[idx],
+                in_half_width=half_widths[prev], out_half_width=half_widths[idx], frozen=frozen, delta=delta,
                 **layer_kwargs)
             #name = f'L{idx}_{layer.out_size[0]}_{layer.out_channels}'
             name = f'L{idx}_{int(sizes_1k[idx])}_{int(channels_1k[idx])}'
             setattr(self, name, layer)
             self.layer_names.append(name)
+
+    def remove_all_delta_weights(self, rank):
+        for layer_name in self.layer_names:
+            layer: SynthesisLayer = getattr(self, layer_name)
+            layer.affine.remove_delta_weights()
+        if rank == 0:
+            print('Removed all delta weights for teacher model')
 
     def compute_stuff_for_resolution(self, img_resolution, channel_base, channel_max): # Added
         first_cutoff        = 2       # Cutoff frequency of the first layer (f_{c,0}).
@@ -815,6 +864,7 @@ class Generator(torch.nn.Module):
         training_mode        = 'global',
         scale_mapping_kwargs = {},  # Arguments for Scale Mapping Network
         actual_resolution = None,
+        freezeG              = 0,    # Number of frozen channels
         **synthesis_kwargs,         # Arguments for SynthesisNetwork.
     ):
         self.actual_resolution = actual_resolution if actual_resolution is not None else img_resolution
@@ -832,10 +882,10 @@ class Generator(torch.nn.Module):
             self.use_scale_affine = False # force not use affine layer on style input
         self.synthesis: SynthesisNetwork = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels,
                                           training_mode=training_mode, 
-                                          actual_resolution=self.actual_resolution,
+                                          actual_resolution=self.actual_resolution, freezeG = freezeG,
                                           **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
-        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+        self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, frozen = freezeG > 0, **mapping_kwargs)
         if 'patch' in self.training_mode: # Added to check if we actually use scale
             self.scale_mapping_kwargs = scale_mapping_kwargs
             scale_mapping_norm = scale_mapping_kwargs.scale_mapping_norm
@@ -858,7 +908,7 @@ class Generator(torch.nn.Module):
             scale = torch.ones(z.shape[0], 1).to(z.device)
         else:
             scale = 1/transform[:, [0], 0]
-        if self.scale_mapping_kwargs:
+        if self.scale_mapping_kwargs and self.actual_resolution == self.img_resolution and self.use_scale_on_top:
             scale = self.scale_norm(scale)
             mapped_scale = self.scale_mapping(scale, c, update_emas=update_emas)
         else:
@@ -897,3 +947,102 @@ class ScaleNormalizePositive(torch.nn.Module):
         # add a small offset to avoid zero point: [0.1 to 1.1]
         scale = (scale - self.scale_mapping_min) / (self.scale_mapping_max - self.scale_mapping_min)
         return scale + 0.1
+    
+from torch import nn
+@persistence.persistent_class
+class ScalarEncoder1d(nn.Module):
+    """
+    1-dimensional Fourier Features encoder (i.e. encodes raw scalars)
+    Assumes that scalars are in [0, 1]
+    """
+    def __init__(self, coord_dim: int, x_multiplier: float, const_emb_dim: int, use_raw: bool=False, **fourier_enc_kwargs):
+        super().__init__()
+        self.coord_dim = coord_dim
+        self.const_emb_dim = const_emb_dim
+        self.x_multiplier = x_multiplier
+        self.use_raw = use_raw
+
+        if self.const_emb_dim > 0 and self.x_multiplier > 0:
+            self.const_embed = nn.Embedding(int(np.ceil(x_multiplier)) + 1, self.const_emb_dim)
+        else:
+            self.const_embed = None
+
+        if self.x_multiplier > 0:
+            self.fourier_encoder = FourierEncoder1d(coord_dim, max_x_value=x_multiplier, **fourier_enc_kwargs)
+            self.fourier_dim = self.fourier_encoder.get_dim()
+        else:
+            self.fourier_encoder = None
+            self.fourier_dim = 0
+
+        self.raw_dim = 1 if self.use_raw else 0
+
+    def get_dim(self) -> int:
+        return self.coord_dim * (self.const_emb_dim + self.fourier_dim + self.raw_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Assumes that x is in [0, 1] range
+        """
+        misc.assert_shape(x, [None, self.coord_dim])
+        batch_size, coord_dim = x.shape
+        out = torch.empty(batch_size, self.coord_dim, 0, device=x.device, dtype=x.dtype) # [batch_size, coord_dim, 0]
+        if self.use_raw:
+            out = torch.cat([out, x.unsqueeze(2)], dim=2) # [batch_size, coord_dim, 1]
+        if not self.fourier_encoder is None or not self.const_embed is None:
+            # Convert from [0, 1] to the [0, `x_multiplier`] range
+            x = x.float() * self.x_multiplier # [batch_size, coord_dim]
+        if not self.fourier_encoder is None:
+            fourier_embs = self.fourier_encoder(x) # [batch_size, coord_dim, fourier_dim]
+            out = torch.cat([out, fourier_embs], dim=2) # [batch_size, coord_dim, raw_dim + fourier_dim]
+        if not self.const_embed is None:
+            const_embs = self.const_embed(x.round().long()) # [batch_size, coord_dim, const_emb_dim]
+            out = torch.cat([out, const_embs], dim=2) # [batch_size, coord_dim, raw_dim + fourier_dim + const_emb_dim]
+        out = out.view(batch_size, coord_dim * (self.raw_dim + self.const_emb_dim + self.fourier_dim)) # [batch_size, coord_dim * (raw_dim + const_emb_dim + fourier_dim)]
+        return out
+
+#----------------------------------------------------------------------------
+
+@persistence.persistent_class
+class FourierEncoder1d(nn.Module):
+    def __init__(self,
+            coord_dim: int,               # Number of scalars to encode for each sample
+            max_x_value: float=100.0,       # Maximum scalar value (influences the amount of fourier features we use)
+            transformer_pe: bool=False,     # Whether we should use positional embeddings from Transformer
+            use_cos: bool=True,
+            **construct_freqs_kwargs,
+        ):
+        super().__init__()
+        assert coord_dim >= 1, f"Wrong coord_dim: {coord_dim}"
+        self.coord_dim = coord_dim
+        self.use_cos = use_cos
+        if transformer_pe:
+            d_model = 512
+            fourier_coefs = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model)) # [d_model]
+        else:
+            fourier_coefs = construct_log_spaced_freqs(max_x_value, **construct_freqs_kwargs)
+        self.register_buffer('fourier_coefs', fourier_coefs) # [num_fourier_feats]
+        self.fourier_dim = self.fourier_coefs.shape[0]
+
+    def get_dim(self) -> int:
+        return self.fourier_dim * (2 if self.use_cos else 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.ndim == 2, f"Wrong shape: {x.shape}"
+        assert x.shape[1] == self.coord_dim
+        fourier_raw_embs = self.fourier_coefs.view(1, 1, self.fourier_dim) * x.float().unsqueeze(2) # [batch_size, coord_dim, fourier_dim]
+        if self.use_cos:
+            fourier_embs = torch.cat([fourier_raw_embs.sin(), fourier_raw_embs.cos()], dim=2) # [batch_size, coord_dim, 2 * fourier_dim]
+        else:
+            fourier_embs = fourier_raw_embs.sin() # [batch_size, coord_dim, fourier_dim]
+        return fourier_embs
+
+#----------------------------------------------------------------------------
+from typing import Tuple
+def construct_log_spaced_freqs(max_t: int, skip_small_t_freqs: int=0, skip_large_t_freqs: int=0) -> Tuple[int, torch.Tensor]:
+    time_resolution = 2 ** np.ceil(np.log2(max_t))
+    num_fourier_feats = np.ceil(np.log2(time_resolution)).astype(int)
+    powers = torch.tensor([2]).repeat(num_fourier_feats).pow(torch.arange(num_fourier_feats)) # [num_fourier_feats]
+    powers = powers[skip_large_t_freqs:len(powers) - skip_small_t_freqs] # [num_fourier_feats]
+    fourier_coefs = powers.float() * np.pi # [1, num_fourier_feats]
+
+    return fourier_coefs / time_resolution

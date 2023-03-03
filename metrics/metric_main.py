@@ -119,7 +119,13 @@ def fid2k_base(opts):
     opts.extra.reconfigure_resolution = 1024 # return back to 1k
     fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=2000)
     return dict(fid2k_base=fid)
-    
+@register_metric
+def fid2k_ds(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    opts.extra.use_ds = True
+    fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=2000)
+    return dict(fid2k_ds=fid)
+
 @register_metric
 def fid50k_full(opts):
     opts.dataset_kwargs.update(max_size=None, xflip=False)
