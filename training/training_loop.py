@@ -165,8 +165,8 @@ def training_loop(
         if rank == 0:
             print('Loading patch dataset...')
         patch_dset = dnnlib.util.construct_class_by_name(**patch_kwargs) # subclass of training.dataset.Dataset
-        with open('testa/patch_kwargs.pkl', 'wb') as f:
-            pickle.dump(patch_kwargs, f)
+        # with open('testa/patch_kwargs.pkl', 'wb') as f:
+        #     pickle.dump(patch_kwargs, f)
         patch_dset_sampler = misc.InfiniteSampler(dataset=patch_dset, rank=rank, num_replicas=num_gpus, seed=random_seed)
         patch_dset_iterator = iter(torch.utils.data.DataLoader(dataset=patch_dset, sampler=patch_dset_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs))
         if rank == 0:
