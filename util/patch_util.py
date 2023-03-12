@@ -89,7 +89,8 @@ class PatchSampler(object):
                 x = random.randint(0, 12)
             y = random.randint(0, 12)
             params['split_range'] = (x, x+self.latent_len, y, y+self.latent_len)
-            actual_coords = grid2pixel(params['split_range'], r=True)
+            actual_coords = grid2pixel(params['split_range'], res=self.patch_size,
+                                        increment=self.patch_size//4, r=True)
             params['coords'] = actual_coords[0] if isinstance(actual_coords, list) else actual_coords # returns a list # TODO: maybe param this?
             
             x = params['coords'][0] # calculate actual coords (x_start, x_end, y_start, y_end)
@@ -177,7 +178,7 @@ def get_list_of_slices(max_len=24, skip=4):
     
     return potential_list
 
-def get_grid_params(resolution:int = 4096):
+def get_grid_params(resolution:int = 4096, actual_resolution:int = 4096):
     """Get the grid parameters for a given resolution
 
     Args:
@@ -186,15 +187,17 @@ def get_grid_params(resolution:int = 4096):
     Returns:
         list: List of tuples of the form (x, y)
     """
-    if resolution == 4096:
+    if resolution == 4096 and actual_resolution == 1024:
         return get_list_of_slices(24, 4)
-    elif resolution == 1024:
+    elif resolution == 1024 and actual_resolution == 1024:
+        return get_list_of_slices(24, 4) # TODO: check if this is correct
+    elif resolution == 1024 and actual_resolution == 4096:
         return NotImplementedError("Theoreticall need to figure out") # get_list_of_slices(28, 3)
     else:
         raise ValueError("Resolution not supported")
     
-def generate_full_from_patches_slices(new_size:int, device:torch.device=None):
-    rez = get_grid_params(new_size)
+def generate_full_from_patches_slices(new_size:int, actual_resolution:int, device:torch.device=None):
+    rez = get_grid_params(new_size, actual_resolution)
     if device is not None:
         rez = torch.tensor(rez, device=device)
     return rez

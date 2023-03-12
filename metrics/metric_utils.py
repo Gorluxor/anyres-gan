@@ -342,7 +342,7 @@ from torchvision.transforms.functional import resize, InterpolationMode
 def generate_downsampled_patches(G, z, c, device, G_kwargs):
     """Generate images with slice patches and compile them back
     """
-    slice_ranges_4k = patch_util.generate_full_from_patches_slices(G.img_resolution, device=device)
+    slice_ranges_4k = patch_util.generate_full_from_patches_slices(G.img_resolution, G.actual_resolution, device=device)
     batch_size = z.shape[0] # same as batch_gen
     return resize(patch_util.reconstruct_image_from_patches(torch.stack([torch.cat([G(z=z, c=c, slice_range=sl.repeat(batch_size, 1), **G_kwargs)]) for sl in slice_ranges_4k])), (G.actual_resolution, G.actual_resolution), interpolation=InterpolationMode.BILINEAR)
 

@@ -180,6 +180,7 @@ def parse_comma_separated_list(s):
 @click.option('--random_crop', help='random crop image on LR dataset (specify if images are not preprocessed to same size and square)', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--data_max_size', help='LR dataset max number of images', type=click.IntRange(min=0))
 @click.option('--g_size', help='size of G (if different from dataset size)', type=click.IntRange(min=0))
+@click.option('--patch_size', help='size of patch (if different from dataset size)', type=click.IntRange(min=0), default=0)
 
 # additional options for patch model
 @click.option('--teacher', help='teacher checkpoint', metavar='[PATH|URL]',  type=str)
@@ -209,11 +210,14 @@ def parse_comma_separated_list(s):
 @click.option('--use_normal_x', help='use normal position sampling x for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--use_old_filters', help='use old compatible filters, else just use 4k ones', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--log_hr', help='log HR 1 Forward Pass images', is_flag=True, default=False)
+@click.option('--log_imgs', help='log fakes and real imgs', is_flag=True, default=False)
 @click.option('--log_lr', help='log LR reconfigured forward pass images', is_flag=True, default=False)
 @click.option('--use_grad_clip', help='use grad clip for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--reinitd', help='reinit Discriminator', metavar='FLOAT', is_flag=True, default=False)
 @click.option('--freezeg', help='Freeze first layers of G', metavar='INT', type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--deltag', help='Delta G', metavar='FLOAT', type=click.IntRange(min=0), default=0.0, show_default=True)
+@click.option('--overrided', help='Override D, location of pkl file', metavar='[PATH|URL]', type=str)
+@click.option('--bcond', help='Use bcond', metavar='BOOL', type=bool, default=False, show_default=True)
 def main(**kwargs):
 
     # Initialize config.
@@ -254,7 +258,7 @@ def main(**kwargs):
         # patch dataset kwargs
         patch_kwargs = dnnlib.EasyDict(
             class_name='training.dataset.ImagePatchDataset',
-            path=opts.data_hr, resolution=opts.g_size,
+            path=opts.data_hr, resolution=opts.g_size if opts.patch_size ==0 else opts.patch_size,
             scale_min=opts.scale_min, scale_max=opts.scale_max,
             scale_anneal=opts.scale_anneal, random_crop=opts.patch_crop,
             use_labels=True, max_size=None, xflip=False, use_normal=opts.use_normal_x, use_hr=opts.use_hr)
@@ -295,6 +299,9 @@ def main(**kwargs):
             log_LR=opts.log_lr, # Added
             use_grad_clip = opts.use_grad_clip, # Added
             reinitd = opts.reinitd, # Added
+            overrided = opts.overrided, # Added
+            bcond = opts.bcond, # Added
+            log_imgs = opts.log_imgs, # Added
         )
         if opts.use_hr:
             c.G_kwargs.use_scale_affine = False # TODO:for now disable scaling totally
@@ -352,6 +359,9 @@ def main(**kwargs):
             c.G_kwargs.use_radial_filters = True # Use radially symmetric downsampling filters.
             c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
             c.loss_kwargs.blur_fade_kimg = c.batch_size * 200 / 32 # Fade out the blur during the first N kimg.
+
+    if opts.use_hr and opts.bcond:
+        c.G_reg_interval = 1 # change the teacher model and student model to use different conditioning
 
     # Augmentation.
     if opts.aug != 'noaug':

@@ -86,8 +86,7 @@ def pfid(opts, minX, maxY, target_resolution=1024, num=50000, mode='patch'):
     
     dataset_kwargs = opts.patch_kwargs
     patch_size = target_resolution #  int(util.remove_prefix(metric.split('-')[1], 'patch'))
-        
-    assert(patch_size == dataset_kwargs.resolution)
+    # assert(patch_size == actual_patch)
     
     size_min = minX
     size_max = maxY
@@ -143,12 +142,14 @@ def pfid2k(opts): # maybe different values for minX, maxY?
     opts.dataset_kwargs.update(max_size=None, xflip=False)
     fid = pfid(opts, minX=256, maxY=1024, target_resolution=1024, num=2000, mode='patch')
     return dict(pfid2k=fid)
-
+called_first_time = False
 @register_metric
 def pfid2k_fixed(opts):
     opts.dataset_kwargs.update(max_size=None, xflip=False)
     opts.extra.use_hr = True
-    fid = pfid(opts, minX=1024, maxY=1024, target_resolution=1024, num=2000, mode='patch')
+    # use patch size for sizes
+    fid = pfid(opts, minX=opts.patch_kwargs.resolution, maxY=opts.patch_kwargs.resolution,
+               target_resolution=opts.patch_kwargs.resolution, num=2000, mode='patch')
     return dict(pfid2k_fixed=fid)
 
 @register_metric

@@ -30,3 +30,4 @@ test*/*
 .vscode/launch.json
 wandb/*
 paths.txt
+patches*/*

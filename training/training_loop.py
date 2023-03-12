@@ -165,6 +165,8 @@ def training_loop(
         if rank == 0:
             print('Loading patch dataset...')
         patch_dset = dnnlib.util.construct_class_by_name(**patch_kwargs) # subclass of training.dataset.Dataset
+        with open('testa/patch_kwargs.pkl', 'wb') as f:
+            pickle.dump(patch_kwargs, f)
         patch_dset_sampler = misc.InfiniteSampler(dataset=patch_dset, rank=rank, num_replicas=num_gpus, seed=random_seed)
         patch_dset_iterator = iter(torch.utils.data.DataLoader(dataset=patch_dset, sampler=patch_dset_sampler, batch_size=batch_size//num_gpus, **data_loader_kwargs))
         if rank == 0:
@@ -185,8 +187,13 @@ def training_loop(
         if rank == 0:
             print("Using specified img resolution: %d" % img_resolution)
         assert(added_kwargs.img_size == training_set.resolution)
-    common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=img_resolution, img_channels=training_set.num_channels)
+    num_cdim = training_set.label_dim if not added_kwargs.bcond else 1
+    common_kwargs = dict(c_dim=num_cdim, img_resolution=img_resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
+    if added_kwargs.overrided: # change D img_resolution to be 1/4
+        common_kwargs['img_resolution'] = img_resolution // 4
+        D_kwargs['channel_base'] = D_kwargs['channel_base'] // 2
+        assert added_kwargs.use_hr == True, "Use hr must be true when overrided"
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     if 'patch' in training_mode and added_kwargs.teacher is not None:
         teacher = copy.deepcopy(G).to(device).eval()
@@ -221,6 +228,10 @@ def training_loop(
             for name, module in [('G', G), ('G_ema', teacher), ('G_ema', G_ema), ('D', D)]:
                 if added_kwargs.reinitd and name == 'D': # skip copying discriminator
                     continue
+                if added_kwargs.overrided and name == 'D': # load from a different discriminator
+                    with dnnlib.util.open_url(added_kwargs.overrided) as f:
+                        misc.copy_params_and_buffers(legacy.load_network_pkl(f)['D'], module, require_all=True, allow_ignore_different_shapes=False)
+                    continue
                 misc.copy_params_and_buffers(teacher_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
             print(f"done loading teacher on device %s! " % rank)
             # util.set_requires_grad(False, teacher)
@@ -247,6 +258,10 @@ def training_loop(
         print('--- Teacher ---')
         img = misc.print_module_summary(teacher, [z, c])
         print('--- Discriminator ---')
+        if added_kwargs.overrided:
+            # Downsample images, just for printing
+            from torch.nn import functional as F
+            img = F.interpolate(img, size=(img_resolution // 4, img_resolution // 4), mode='bilinear', align_corners=False)
         misc.print_module_summary(D, [img, c])
         del img
         torch.cuda.empty_cache()
@@ -317,14 +332,17 @@ def training_loop(
     torch.cuda.empty_cache()
     if rank == 0:
         with torch.no_grad():
-            # print('Exporting samples skipped...')
             print('Exporting sample images...')
             grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
             save_image_grid(images, os.path.join(run_dir, 'reals.jpg'), drange=[0,255], grid_size=grid_size)
             grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
             grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
             del images
-            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            if added_kwargs.use_hr:
+                slice_ranges_4k = patch_util.generate_full_from_patches_slices(added_kwargs.actual_resolution, G_ema.actual_resolution, device=device)
+                images = patch_util.reconstruct_image_from_patches(torch.stack([torch.cat([G_ema(z=z, c=c, noise_mode='const', slice_range=sl.repeat(z.shape[0], 1)).cpu() for z, c in zip(grid_z, grid_c)]) for sl in slice_ranges_4k]))
+            else:
+                images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
             save_image_grid(images, os.path.join(run_dir, 'fakes_init.jpg'), drange=[-1,1], grid_size=grid_size)
             print('Done exporting sample images...')
             del images
@@ -356,6 +374,7 @@ def training_loop(
     tick_start_time = time.time()
     maintenance_time = tick_start_time - start_time
     batch_idx = 0
+    import torchvision
     if progress_fn is not None:
         progress_fn(0, total_kimg)
     while True:
@@ -393,9 +412,14 @@ def training_loop(
                     data, phase_real_c = next(patch_dset_iterator)
                     phase_real_img = (data['image'].to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
                     phase_real_c = phase_real_c.to(device).split(batch_gpu)
+                    if added_kwargs.log_imgs:
+                        for iw, curr_img in enumerate(phase_real_img):
+                            if not os.path.exists(f'patches_f/{iw}_{cur_tick}.jpg'):
+                                torchvision.utils.save_image(curr_img, f'patches_f/{iw}_{cur_tick}.jpg', range=(-1, 1), normalize=True, nrow=4)
                     phase_transform = data['params']['transform'].to(device).split(batch_gpu)
                     if added_kwargs.use_hr:
                         split_range_data = torch.stack(data['params']['split_range']).permute(1,0).to(device)
+                        # those are 1k crops coords for the teacher, not for the actual 
                         coords = patch_util.grid2pixel_tensor_f(split_range_data.clone(), 256, 64).split(batch_gpu) #TODO: parameterize this?
                         split_range = split_range_data.split(batch_gpu)
                     else:
@@ -518,7 +542,7 @@ def training_loop(
             if not added_kwargs.use_hr or added_kwargs.log_HR:
                 images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
                 save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
-            if added_kwargs.use_hr and added_kwargs.img_size != added_kwargs.actual_resolution:
+            if added_kwargs.use_hr: #and added_kwargs.img_size != added_kwargs.actual_resolution:
                 # save lower res images
                 torch.cuda.empty_cache()
                 low_res, high_res = added_kwargs.img_size, added_kwargs.actual_resolution
@@ -528,9 +552,9 @@ def training_loop(
                     save_image_grid(images, os.path.join(run_dir, f'fakes_lr_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
                     G_ema.reconfigure_network(img_resolution=high_res, use_old_filters=added_kwargs.use_old_filters)
                     torch.cuda.empty_cache()
-                
-                slice_ranges_4k = patch_util.generate_full_from_patches_slices(high_res, device=device)
-                images = patch_util.reconstruct_image_from_patches(torch.stack([torch.cat([G_ema(z=z, c=c, noise_mode='const', slice_range=sl.repeat(batch_gpu, 1)).cpu() for z, c in zip(grid_z, grid_c)]) for sl in slice_ranges_4k]))
+                # high_res should be 4096 or 1024, whereas low_res is going to be 1024 and 1024
+                slice_ranges_4k = patch_util.generate_full_from_patches_slices(high_res, low_res, device=device)
+                images = patch_util.reconstruct_image_from_patches(torch.stack([torch.cat([G_ema(z=z, c=c, noise_mode='const', slice_range=sl.repeat(z.shape[0], 1)).cpu() for z, c in zip(grid_z, grid_c)]) for sl in slice_ranges_4k]))
                 save_image_grid(images, os.path.join(run_dir, f'fakes_hr_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
                 # functional interpolate with bilinear
                 images = F_tv.resize(images, (low_res, low_res), interpolation=InterpolationMode.BILINEAR)

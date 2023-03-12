@@ -825,7 +825,7 @@ class SynthesisNetwork(torch.nn.Module):
         x = self.input(ws[0], transform=transform)
         
         if slice_range is not None: # Added to slice images
-            assert slice_range.shape[0] == x.shape[0], f"{slice_range.shape[0]}!={x.shape[0]} slice_range must be None or have the same length as the batch size"
+            assert slice_range.shape[0] == x.shape[0], f"{slice_range.shape[0]}!={x.shape[0]} slice_range must be None or have the same length as the batch size {slice_range.shape=}, {x.shape=}"
             #assert len(slice_range) == x.shape[0], f"{len(slice_range)}!={x.shape[0]} slice_range must be None or have the same length as the batch size"
             x = torch.stack([x[i, :, x_start:x_end, y_start:y_end] for i, (x_start, x_end, y_start, y_end) in zip(range(x.shape[0]), slice_range)])
 
