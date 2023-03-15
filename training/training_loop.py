@@ -230,8 +230,6 @@ def training_loop(
                 if added_kwargs.reinitd and name == 'D': # skip copying discriminator
                     continue
                 if added_kwargs.overrided and name == 'D': # load from a different discriminator
-                    with open('testa/D_before_load.txt', 'w') as f:
-                        print(D, file=f)
                     with dnnlib.util.open_url(added_kwargs.overrided) as f:
                         misc.copy_params_and_buffers(legacy.load_network_pkl(f)['D'], module, require_all=True, allow_ignore_different_shapes=False)
                     continue
@@ -240,9 +238,6 @@ def training_loop(
             # util.set_requires_grad(False, teacher)
     else:
         teacher = None
-    
-    with open('testa/D_after_load.txt', 'w') as f:
-        print(D, file=f)
 
     if teacher is not None:
         teacher.synthesis.remove_all_delta_weights(rank)
