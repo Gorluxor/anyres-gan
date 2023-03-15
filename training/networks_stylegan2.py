@@ -266,7 +266,7 @@ class MappingNetwork(torch.nn.Module):
         return x
 
     def extra_repr(self):
-        return f'z_dim={self.z_dim:d}, c_dim={self.c_dim:d}, w_dim={self.w_dim:d}, num_ws={self.num_ws:d}'
+        return f'z_dim={self.z_dim:d}, c_dim={self.c_dim:d}, w_dim={self.w_dim:d}, num_ws (intermediate latents)={self.num_ws}'
 
 #----------------------------------------------------------------------------
 

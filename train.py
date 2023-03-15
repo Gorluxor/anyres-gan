@@ -202,7 +202,7 @@ def parse_comma_separated_list(s):
 # 4096 x 4096 base view
 @click.option('--use_hr', help='use high resolution base view', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--actual_res', help='actual resolution of the base view, if not given, use ', type=click.IntRange(min=0), default=0, show_default=True)
-@click.option('--use_scale_on_top', help='Should we use scale on top of patch way, or disable it?', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--use_scale_on_top', help='Should we use scale on top of patch way, or disable it?', metavar='BOOL', type=bool, default=True, show_default=True)
 @click.option('--ds_mode', help='downsampling mode', type=click.Choice(['nearest', 'bilinear', 'average', 'bicubic']), default='average', show_default=True)
 @click.option('--l2_lambda', help='l2 loss weight', metavar='FLOAT', type=click.FloatRange(min=0), default=0.0, show_default=True)
 @click.option('--use_grad', help='use grad for patch training adverserial loss', metavar='BOOL', type=bool, default=False, show_default=True)
@@ -217,13 +217,14 @@ def parse_comma_separated_list(s):
 @click.option('--freezeg', help='Freeze first layers of G', metavar='INT', type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--deltag', help='Delta G', metavar='FLOAT', type=click.IntRange(min=0), default=0.0, show_default=True)
 @click.option('--overrided', help='Override D, location of pkl file', metavar='[PATH|URL]', type=str)
-@click.option('--bcond', help='Use bcond', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--bcond', help='Use bcond for D', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--bcondg', help='Use bcond for G', metavar='BOOL', type=bool, default=False, show_default=True)
 def main(**kwargs):
 
     # Initialize config.
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
     c = dnnlib.EasyDict() # Main config dict.
-    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), freezeG=opts.freezeg, deltaG=opts.deltag)
+    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), freezeG=opts.freezeg, deltaG=opts.deltag, use_scale_on_top=opts.use_scale_on_top)
     c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8, weight_decay=opts.l2_lambda)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8, weight_decay=opts.l2_lambda)
@@ -302,6 +303,7 @@ def main(**kwargs):
             overrided = opts.overrided, # Added
             bcond = opts.bcond, # Added
             log_imgs = opts.log_imgs, # Added
+            bcondg = opts.bcondg, # Added
         )
         if opts.use_hr:
             c.G_kwargs.use_scale_affine = False # TODO:for now disable scaling totally

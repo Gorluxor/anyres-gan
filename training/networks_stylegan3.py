@@ -865,6 +865,7 @@ class Generator(torch.nn.Module):
         scale_mapping_kwargs = {},  # Arguments for Scale Mapping Network
         actual_resolution = None,
         freezeG              = 0,    # Number of frozen channels
+        use_scale_on_top     = True, # Use scale on top of the network
         **synthesis_kwargs,         # Arguments for SynthesisNetwork.
     ):
         self.actual_resolution = actual_resolution if actual_resolution is not None else img_resolution
@@ -876,7 +877,7 @@ class Generator(torch.nn.Module):
         self.img_channels = img_channels
         self.training_mode = training_mode
         self.scale_mapping_kwargs = scale_mapping_kwargs
-        self.use_scale_on_top = synthesis_kwargs.get('use_scale_on_top', True)
+        self.use_scale_on_top = use_scale_on_top
         self.use_scale_affine = True if 'patch' in self.training_mode else False # add affine layer on style input
         if not self.use_scale_on_top: # Added
             self.use_scale_affine = False # force not use affine layer on style input
@@ -886,7 +887,7 @@ class Generator(torch.nn.Module):
                                           **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, frozen = freezeG > 0, **mapping_kwargs)
-        if 'patch' in self.training_mode: # Added to check if we actually use scale
+        if 'patch' in self.training_mode and use_scale_on_top: # Added to check if we actually use scale
             self.scale_mapping_kwargs = scale_mapping_kwargs
             scale_mapping_norm = scale_mapping_kwargs.scale_mapping_norm
             scale_mapping_min = scale_mapping_kwargs.scale_mapping_min

@@ -187,24 +187,25 @@ def training_loop(
         if rank == 0:
             print("Using specified img resolution: %d" % img_resolution)
         assert(added_kwargs.img_size == training_set.resolution)
-    num_cdim = training_set.label_dim if not added_kwargs.bcond else 1
+    num_cdim = training_set.label_dim if not added_kwargs.bcondg else 1
+    num_cdim_d = training_set.label_dim if not added_kwargs.bcond else 4
     common_kwargs = dict(c_dim=num_cdim, img_resolution=img_resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     if added_kwargs.overrided: # change D img_resolution to be 1/4
         common_kwargs['img_resolution'] = img_resolution // 4
         D_kwargs['channel_base'] = D_kwargs['channel_base'] // 2
         assert added_kwargs.use_hr == True, "Use hr must be true when overrided"
+    common_kwargs['c_dim'] = num_cdim_d
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     if 'patch' in training_mode and added_kwargs.teacher is not None:
         teacher = copy.deepcopy(G).to(device).eval()
-
     if added_kwargs.use_hr and added_kwargs.use_teached_layers:
         reset_value_dict = dnnlib.EasyDict()
         for layer_name in added_kwargs.use_teached_layers:
             reset_value_dict[layer_name] = teacher.state_dict()[layer_name]
 
     if added_kwargs.use_hr == True and 'patch' in training_mode:
-        common_kwargs_4k = dict(c_dim=training_set.label_dim, actual_resolution=img_resolution, img_resolution=added_kwargs.actual_resolution, img_channels=training_set.num_channels)
+        common_kwargs_4k = dict(c_dim=num_cdim, actual_resolution=img_resolution, img_resolution=added_kwargs.actual_resolution, img_channels=training_set.num_channels)
         if rank == 0:
             print('Changing network to 4k version')
         G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs_4k).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
@@ -229,6 +230,8 @@ def training_loop(
                 if added_kwargs.reinitd and name == 'D': # skip copying discriminator
                     continue
                 if added_kwargs.overrided and name == 'D': # load from a different discriminator
+                    with open('testa/D_before_load.txt', 'w') as f:
+                        print(D, file=f)
                     with dnnlib.util.open_url(added_kwargs.overrided) as f:
                         misc.copy_params_and_buffers(legacy.load_network_pkl(f)['D'], module, require_all=True, allow_ignore_different_shapes=False)
                     continue
@@ -238,6 +241,9 @@ def training_loop(
     else:
         teacher = None
     
+    with open('testa/D_after_load.txt', 'w') as f:
+        print(D, file=f)
+
     if teacher is not None:
         teacher.synthesis.remove_all_delta_weights(rank)
     G.reconfigure_network(img_resolution=added_kwargs.actual_resolution, use_old_filters=added_kwargs.use_old_filters)
@@ -250,7 +256,6 @@ def training_loop(
             resume_data = legacy.load_network_pkl(f)
         for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
-
     # Print network summary tables.
     if rank == 0:
         z = torch.empty([batch_gpu, G.z_dim], device=device)
@@ -262,7 +267,8 @@ def training_loop(
             # Downsample images, just for printing
             from torch.nn import functional as F
             img = F.interpolate(img, size=(img_resolution // 4, img_resolution // 4), mode='bilinear', align_corners=False)
-        misc.print_module_summary(D, [img, c])
+        cd = torch.empty([batch_gpu, D.c_dim], device=device)
+        misc.print_module_summary(D, [img, cd])
         del img
         torch.cuda.empty_cache()
         print('--- Generator ---')

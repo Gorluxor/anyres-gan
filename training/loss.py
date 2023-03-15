@@ -139,10 +139,12 @@ class StyleGAN2Loss(Loss):
         v = self.logged_nimg.get(str(curr_val), None)
         self.logged_nimg[str(curr_val)] = True
         # Gmain: Maximize logits for generated images.
+        if self.added_kwargs.use_hr and self.added_kwargs.bcond:
+            disc_c = split.clone().detach() / 36 
+        else:
+            disc_c = gen_c
         if phase in ['Gmain', 'Gboth']:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                if self.added_kwargs.use_hr and self.added_kwargs.bcond:
-                    gen_c = torch.ones(gen_c.shape, 1, device=self.device) # new domain, conditioning is 1
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split) # Added crops
                 # vutils.save_image(gen_img, 'out_fake_patch.png', range=(-1, 1),
                 #                   normalize=True, nrow=4)
@@ -150,7 +152,7 @@ class StyleGAN2Loss(Loss):
                     if v is None and torch.device(f"cuda:0") == self.device:
                         torchvision.utils.save_image(real_img, f'patches/real_img_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
                         torchvision.utils.save_image(gen_img, f'patches/out_fake_patch_bf_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
-                gen_logits = self.run_D(grad_with_all_kernels(gen_img), gen_c, blur_sigma=blur_sigma) if is_patch_mode and self.added_kwargs.use_grad else self.run_D(gen_img, gen_c, blur_sigma=blur_sigma)
+                gen_logits = self.run_D(grad_with_all_kernels(gen_img), disc_c, blur_sigma=blur_sigma) if is_patch_mode and self.added_kwargs.use_grad else self.run_D(gen_img, disc_c, blur_sigma=blur_sigma)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
@@ -183,7 +185,7 @@ class StyleGAN2Loss(Loss):
                             losses.adaptive_downsample256(out_mask[:, :1],
                                                        mode='nearest')
                         )
-                    elif self.added_kwargs.teacher_mode == 'crop' and not self.added_kwargs.bcond:
+                    elif self.added_kwargs.teacher_mode == 'crop' and not self.added_kwargs.bcondg:
                         # teacher_crop, teacher_mask = apply_affine_batch(teacher_img, transform)
                         # crop here is the same
                         # torchvision.utils.save_image(real_img, "out_real_img.png", range=(-1, 1), normalize=True, nrow=4)
@@ -233,16 +235,16 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 loss_Gmain.mean().mul(gain).backward()
     
-        if phase in ['Greg'] and self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcond:
-            # reguralize the loss, by conditioning on c = 0
-            with torch.autograd.profiler.record_function('Greg_forward'):
-                gen_img, gen_ws = self.run_G(gen_z, torch.zeros_like(gen_c), transform, slice_range=split)
-                gen_logits = self.D(gen_img, transform)
-                loss_Greg = torch.nn.functional.softplus(gen_logits)
-                loss_Greg = loss_Greg.mean()
-                training_stats.report('Loss/G/loss_Greg', loss_Greg)
-            with torch.autograd.profiler.record_function('Greg_backward'):
-                loss_Greg.mul(gain).backward()
+        # if phase in ['Greg'] and self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcondg:
+        #     # reguralize the loss, by conditioning on c = 0
+        #     with torch.autograd.profiler.record_function('Greg_forward'):
+        #         gen_img, gen_ws = self.run_G(gen_z, torch.zeros_like(gen_c), transform, slice_range=split)
+        #         gen_logits = self.D(gen_img, transform)
+        #         loss_Greg = torch.nn.functional.softplus(gen_logits)
+        #         loss_Greg = loss_Greg.mean()
+        #         training_stats.report('Loss/G/loss_Greg', loss_Greg)
+        #     with torch.autograd.profiler.record_function('Greg_backward'):
+        #         loss_Greg.mul(gain).backward()
 
         # Gpl: Apply path length regularization.
         if phase in ['Greg', 'Gboth']:
@@ -270,20 +272,25 @@ class StyleGAN2Loss(Loss):
         if phase in ['Dmain', 'Dboth']:
             with torch.autograd.profiler.record_function('Dgen_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split, update_emas=True)                
-                gen_logits = self.run_D(gen_img, gen_c, blur_sigma=blur_sigma, update_emas=True)
+                gen_logits = self.run_D(gen_img, disc_c, blur_sigma=blur_sigma, update_emas=True)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Dgen = torch.nn.functional.softplus(gen_logits) # -log(1 - sigmoid(gen_logits))
             with torch.autograd.profiler.record_function('Dgen_backward'):
                 loss_Dgen.mean().mul(gain).backward()
 
+        if self.added_kwargs.use_hr and self.added_kwargs.bcond:
+            disc_real_c = split.clone().detach() / 36 
+        else:
+            disc_real_c = real_c
         # Dmain: Maximize logits for real images.
         # Dr1: Apply R1 regularization.
         if phase in ['Dmain', 'Dreg', 'Dboth']:
             name = 'Dreal' if phase == 'Dmain' else 'Dr1' if phase == 'Dreg' else 'Dreal_Dr1'
             with torch.autograd.profiler.record_function(name + '_forward'):
                 real_img_tmp = real_img.detach().requires_grad_(phase in ['Dreg', 'Dboth'])
-                real_logits = self.run_D(grad_with_all_kernels(real_img_tmp), real_c, blur_sigma=blur_sigma) if  is_patch_mode and self.added_kwargs.use_grad else self.run_D(real_img_tmp, real_c, blur_sigma=blur_sigma)
+                # here, we need to use the slice_range of the real image
+                real_logits = self.run_D(grad_with_all_kernels(real_img_tmp), disc_real_c, blur_sigma=blur_sigma) if  is_patch_mode and self.added_kwargs.use_grad else self.run_D(real_img_tmp, disc_real_c, blur_sigma=blur_sigma)
                 training_stats.report('Loss/scores/real', real_logits)
                 training_stats.report('Loss/signs/real', real_logits.sign())
 
