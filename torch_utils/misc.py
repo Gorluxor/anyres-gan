@@ -157,7 +157,7 @@ def copy_params_and_buffers(src_module, dst_module, require_all=False, allow_ign
     assert isinstance(dst_module, torch.nn.Module)
     src_tensors = dict(named_params_and_buffers(src_module))
     for name, tensor in named_params_and_buffers(dst_module):
-        assert (name in src_tensors) or (not require_all) or (name is "embed"), f'Missing parameter {name} of Discriminitor shape {tensor.shape}'
+        assert (name in src_tensors) or (not require_all) or (name == "embed"), f'Missing parameter {name} of Discriminitor shape {tensor.shape}'
         if name in src_tensors:
             # if name == "mapping.fc0.weight" or name == "fc0.weight":
                 # print(f"{dst_module=}")    
