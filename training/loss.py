@@ -166,7 +166,7 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Scale/G/min_scale', min_scale)
                 training_stats.report('Scale/G/max_scale', max_scale)
                 lpips_loss = None
-                if self.teacher is not None and self.added_kwargs.teacher_lambda > 0:
+                if self.teacher is not None and self.added_kwargs.teacher_lambda > 0 and not self.added_kwargs.bcondg:
                     teacher_img = self.teacher(gen_z, gen_c)
                     if self.added_kwargs.teacher_mode == 'forward':
                         teacher_crop, teacher_mask = apply_affine_batch(teacher_img, transform)
@@ -246,12 +246,39 @@ class StyleGAN2Loss(Loss):
         else:
             gen_c_r = gen_c
         if phase in ['Greg'] and self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcondg:    
-            with torch.autograd.profiler.record_function('Greg_forward'):    
+            with torch.autograd.profiler.record_function('Greg_forward'):
+                teacher_img = self.teacher(gen_z, gen_c_r)    
                 gen_img, gen_ws = self.run_G(gen_z, gen_c_r, transform, slice_range=split)
                 gen_logits = self.D(gen_img, transform)
                 loss_Greg = torch.nn.functional.softplus(gen_logits)
+                
+                should_crop = True if coords is not None and coords[0] is not None else False
+                if should_crop:
+                    teacher_img = patch_util.pil_crop_on_tensors(teacher_img, coords, r=True)
+                else: 
+                    if self.ds_mode == 'average':
+                        teacher_img = losses.adaptive_downsample256_avg(teacher_img)
+                    else:
+                        teacher_img = losses.adaptive_downsample256(teacher_img, mode=self.ds_mode)
+                # torch.ones_like for B x 1 x H x W
+                mask = torch.ones_like(teacher_img[:, :1, :, :])
+                if self.ds_mode == 'average':
+                    gen_img = losses.adaptive_downsample256_avg(gen_img)
+                else:
+                    gen_img = losses.adaptive_downsample256(gen_img, mode=self.ds_mode)
+                # gen_img1 = losses.adaptive_downsample256(gen_img.clone(), mode='nearest')
+                # gen_img2 = losses.adaptive_downsample256(gen_img.clone(), mode='bilinear')
+                if self.added_kwargs.log_imgs:
+                    if v is None and torch.device(f"cuda:0") == self.device:
+                        print(f'Printing {curr_val}\n')
+                        torchvision.utils.save_image(teacher_img, f'patches/out_teacher_patch_af_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
+                        torchvision.utils.save_image(gen_img, f'patches/out_fake_patch_af_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
+                l1_loss = self.loss_l1(gen_img, teacher_img, mask)               
+                lpips_loss = self.loss_lpips(gen_img, teacher_img, mask) 
                 loss_Greg = loss_Greg.mean()
-                training_stats.report('Loss/G/loss_Greg', loss_Greg)
+                training_stats.report('Loss/G/loss_teacher_l1', l1_loss)
+                training_stats.report('Loss/G/loss_teacher_lpips', lpips_loss)
+                training_stats.report('Loss/G/loss_reg', loss_Greg)
             with torch.autograd.profiler.record_function('Greg_backward'):
                 loss_Greg.mul(gain).backward()
 
