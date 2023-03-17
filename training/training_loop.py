@@ -231,7 +231,7 @@ def training_loop(
                     continue
                 if added_kwargs.overrided and name == 'D': # load from a different discriminator
                     with dnnlib.util.open_url(added_kwargs.overrided) as f:
-                        misc.copy_params_and_buffers(legacy.load_network_pkl(f)['D'], module, require_all=True, allow_ignore_different_shapes=False)
+                        misc.copy_params_and_buffers(legacy.load_network_pkl(f)['D'], module, require_all=False, allow_ignore_different_shapes=False)
                     continue
                 misc.copy_params_and_buffers(teacher_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
             print(f"done loading teacher on device %s! " % rank)
