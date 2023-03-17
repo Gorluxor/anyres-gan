@@ -238,13 +238,7 @@ def training_loop(
                     continue
                 if added_kwargs.overrided and name == 'D': # load from a different discriminator
                     with dnnlib.util.open_url(added_kwargs.overrided) as f:
-                        D_new = legacy.load_network_pkl(f)['D']
-                        # with open('testa/NOWW_D.txt', 'w') as f:
-                        #     print("D_new: ", D_new, file=f)
-                        #     print("D: ", module, file=f)
-                        # with open('testa/NOWW_D_actual.txt', 'w') as f:
-                        #     print('Actual: D', D, file=f)
-                        misc.copy_params_and_buffers(D_new, module, require_all=False, allow_ignore_different_shapes=False)
+                        misc.copy_params_and_buffers(legacy.load_network_pkl(f)['D'], module, require_all=False, allow_ignore_different_shapes=False)
                     continue
                 misc.copy_params_and_buffers(teacher_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
             print(f"done loading teacher on device %s! " % rank)
