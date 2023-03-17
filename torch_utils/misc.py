@@ -159,11 +159,17 @@ def copy_params_and_buffers(src_module, dst_module, require_all=False, allow_ign
     for name, tensor in named_params_and_buffers(dst_module):
         assert (name in src_tensors) or (not require_all) or (name == "embed"), f'Missing parameter {name} of Discriminitor shape {tensor.shape}'
         if name in src_tensors:
-            # if name == "mapping.fc0.weight" or name == "fc0.weight":
-                # print(f"{dst_module=}")    
-            #     print(f"Mapping=:={tensor.shape}=={src_tensors[name].shape}")
-            #     if tensor.shape[1] == src_tensors[name].shape[1] + 1:
-            #         # create new weight from existing src_tensor, and zeros, on the required device
+            if name == "mapping.fc0.weight" or name == "fc0.weight":
+                if tensor.shape[1] == src_tensors[name].shape[1] * 2:
+                    # this means mapping.fc0.weight: got torch.Size([512, 512]), expected torch.Size([512, 1024])
+                    print(f'mapping => copy_params_and_buffers: {name}: got {tensor.shape}, expected {src_tensors[name].shape}')
+                    # concetanate, with correct device of dst_module
+                    new_weight = torch.cat((src_tensors[name].to(tensor.device), tensor[:, :-512]), dim=1)
+                    tensor.copy_(new_weight).requires_grad_(tensor.requires_grad)
+                    continue
+                elif tensor.shape[1] != src_tensors[name].shape[1] and not allow_ignore_different_shapes:
+                    raise ValueError(f'Wrong shape for {name}: got {tensor.shape}, expected {src_tensors[name].shape}')
+            # create new weight from existing src_tensor, and zeros, on the required device
             #         if bcond_init == 'zero':
             #             added = torch.zeros(src_tensors[name].shape[1], 1, device=src_tensors[name].device)
             #         elif bcond_init == 'kaiming':

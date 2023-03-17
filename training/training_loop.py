@@ -226,12 +226,25 @@ def training_loop(
             print(f"loading teacher from {added_kwargs.teacher} on device %s! " % rank)
             with dnnlib.util.open_url(added_kwargs.teacher) as f:
                 teacher_data = legacy.load_network_pkl(f)
+            # with open('testa/NOW_teacher.txt', 'w') as f:
+            #     print(f'Teacher: {teacher_data["G"]}', file=f)
+            #     print(f'Teacher D: {teacher_data["D"]}', file=f)
+            # with open('testa/NOW_actual.txt', 'w') as f:
+            #     print(f'Actual: {G}', file=f)
+            #     print(f'Actual D: {D}', file=f)
             for name, module in [('G', G), ('G_ema', teacher), ('G_ema', G_ema), ('D', D)]:
+                print('Copying', name)
                 if added_kwargs.reinitd and name == 'D': # skip copying discriminator
                     continue
                 if added_kwargs.overrided and name == 'D': # load from a different discriminator
                     with dnnlib.util.open_url(added_kwargs.overrided) as f:
-                        misc.copy_params_and_buffers(legacy.load_network_pkl(f)['D'], module, require_all=True, allow_ignore_different_shapes=False)
+                        D_new = legacy.load_network_pkl(f)['D']
+                        # with open('testa/NOWW_D.txt', 'w') as f:
+                        #     print("D_new: ", D_new, file=f)
+                        #     print("D: ", module, file=f)
+                        # with open('testa/NOWW_D_actual.txt', 'w') as f:
+                        #     print('Actual: D', D, file=f)
+                        misc.copy_params_and_buffers(D_new, module, require_all=False, allow_ignore_different_shapes=False)
                     continue
                 misc.copy_params_and_buffers(teacher_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
             print(f"done loading teacher on device %s! " % rank)
@@ -337,7 +350,13 @@ def training_loop(
             grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
             save_image_grid(images, os.path.join(run_dir, 'reals.jpg'), drange=[0,255], grid_size=grid_size)
             grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
-            grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
+            if not added_kwargs.bcondg:
+                grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
+            else: # add to grid_c, 0's, for old domain => append to each grid_c
+                grid_c = torch.from_numpy(labels).to(device)
+                grid_c = torch.cat((grid_c, torch.zeros(grid_c.shape[0], 1).to(device)), dim=1)
+                grid_c = grid_c.split(batch_gpu)
+
             del images
             if added_kwargs.use_hr:
                 slice_ranges_4k = patch_util.generate_full_from_patches_slices(added_kwargs.actual_resolution, G_ema.actual_resolution, device=device)
@@ -595,7 +614,7 @@ def training_loop(
                 print('Evaluating metrics...')
             for metric in metrics:
                 result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'],
-                    dataset_kwargs=training_set_kwargs, patch_kwargs=patch_kwargs, num_gpus=num_gpus, rank=rank, device=device)
+                    dataset_kwargs=training_set_kwargs, patch_kwargs=patch_kwargs, num_gpus=num_gpus, rank=rank, device=device, extra={"bcondg": added_kwargs.bcondg})
                 if rank == 0:
                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
                 stats_metrics.update(result_dict.results)

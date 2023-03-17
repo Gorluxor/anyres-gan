@@ -362,7 +362,7 @@ def main(**kwargs):
             c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
             c.loss_kwargs.blur_fade_kimg = c.batch_size * 200 / 32 # Fade out the blur during the first N kimg.
 
-    if opts.use_hr and opts.bcond:
+    if opts.use_hr and opts.bcondg:
         c.G_reg_interval = 1 # change the teacher model and student model to use different conditioning
 
     # Augmentation.

@@ -29,8 +29,10 @@ from util import patch_util
 #----------------------------------------------------------------------------
 
 class MetricOptions:
-    def __init__(self, G=None, G_kwargs={}, patch_kwargs = {}, dataset_kwargs={}, num_gpus=1, rank=0, device=None, progress=None, cache=True):
+    def __init__(self, G=None, G_kwargs={}, patch_kwargs = {}, dataset_kwargs={}, num_gpus=1, rank=0, device=None, progress=None, cache=True, extra = {}):
         assert 0 <= rank < num_gpus
+        if extra.get('bcondg', None) == None:
+            extra['bcondg'] = False
         self.G              = G
         self.G_kwargs       = dnnlib.EasyDict(G_kwargs)
         self.dataset_kwargs = dnnlib.EasyDict(dataset_kwargs)
@@ -40,7 +42,7 @@ class MetricOptions:
         self.device         = device if device is not None else torch.device('cuda', rank)
         self.progress       = progress.sub() if progress is not None and rank == 0 else ProgressMonitor()
         self.cache          = cache
-        self.extra          = dnnlib.EasyDict([])
+        self.extra          = dnnlib.EasyDict(extra)
 #----------------------------------------------------------------------------
 
 _feature_detector_cache = dict()
@@ -63,9 +65,13 @@ def get_feature_detector(url, device=torch.device('cpu'), num_gpus=1, rank=0, ve
 
 #----------------------------------------------------------------------------
 
-def iterate_random_labels(opts, batch_size):
-    if opts.G.c_dim == 0:
+def iterate_random_labels(opts, batch_size, extra = None):
+    extra_dim = 0 if extra is None or extra.get('bcondg', None) is None else extra.bcondg * 1 
+    if opts.G.c_dim == 0 or opts.G.c_dim == extra_dim: # if opts.G.c_dim is only the extra_dim 
+        # add an extra dimension if extra.bcondg
         c = torch.zeros([batch_size, opts.G.c_dim], device=opts.device)
+        if extra_dim > 0:
+            c[:, -extra_dim:] = torch.ones([batch_size, extra_dim], device=opts.device)
         while True:
             yield c
     else:
@@ -73,6 +79,8 @@ def iterate_random_labels(opts, batch_size):
         while True:
             c = [dataset.get_label(np.random.randint(len(dataset))) for _i in range(batch_size)]
             c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
+            if extra_dim > 0:
+                c[:, -extra_dim:] = torch.ones([batch_size, extra_dim], device=opts.device)
             yield c
 
 #----------------------------------------------------------------------------
@@ -353,7 +361,7 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
 
     # Setup generator and labels.
     G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
-    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen)
+    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen, extra=opts.extra)
     if opts.extra.get('reconfigure_resolution', None) is not None:
         G.reconfigure_network(img_resolution=opts.extra.reconfigure_resolution)
     # Initialize.
@@ -555,7 +563,7 @@ def compute_feature_stats_for_generator_full(opts, detector_url, detector_kwargs
 
     # Setup generator and labels.
     G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
-    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen)
+    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen, extra=opts.extra)
 
     # Initialize.
     stats = FeatureStats(**stats_kwargs)
@@ -610,7 +618,7 @@ def compute_feature_stats_for_generator_up(opts, detector_url, detector_kwargs, 
 
     # Setup generator and labels.
     G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
-    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen)
+    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen, extra=opts.extra)
 
     # Initialize.
     stats = FeatureStats(**stats_kwargs)
@@ -660,7 +668,7 @@ def compute_feature_stats_for_generator_patch(opts, transformations, detector_ur
 
     # Setup generator and labels.
     G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
-    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen)
+    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen, extra=opts.extra)
 
     # Initialize.
     stats = FeatureStats(**stats_kwargs)

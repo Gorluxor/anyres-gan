@@ -143,9 +143,15 @@ class StyleGAN2Loss(Loss):
             disc_c = split.clone().detach() / 36 
         else:
             disc_c = gen_c
+
+        if self.added_kwargs.bcondg:
+            # attach, ones to gen_c, NEW DOMAIN
+            gen_c_c = torch.cat((gen_c.clone().detach(), torch.ones(gen_c.shape[0], 1).to(self.device)), dim=1)
+        else:
+            gen_c_c = gen_c
         if phase in ['Gmain', 'Gboth']:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split) # Added crops
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c_c, transform, slice_range=split) # Added crops
                 # vutils.save_image(gen_img, 'out_fake_patch.png', range=(-1, 1),
                 #                   normalize=True, nrow=4)
                 if self.added_kwargs.log_imgs:
@@ -234,24 +240,27 @@ class StyleGAN2Loss(Loss):
                         training_stats.report('Loss/G/loss_total', loss_Gmain)
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 loss_Gmain.mean().mul(gain).backward()
-    
-        # if phase in ['Greg'] and self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcondg:
-        #     # reguralize the loss, by conditioning on c = 0
-        #     with torch.autograd.profiler.record_function('Greg_forward'):
-        #         gen_img, gen_ws = self.run_G(gen_z, torch.zeros_like(gen_c), transform, slice_range=split)
-        #         gen_logits = self.D(gen_img, transform)
-        #         loss_Greg = torch.nn.functional.softplus(gen_logits)
-        #         loss_Greg = loss_Greg.mean()
-        #         training_stats.report('Loss/G/loss_Greg', loss_Greg)
-        #     with torch.autograd.profiler.record_function('Greg_backward'):
-        #         loss_Greg.mul(gain).backward()
+        if self.added_kwargs.bcondg:
+            # add zeros, to the specific values respecting batch size (OLD DOMAIN)
+            gen_c_r = torch.cat((gen_c.clone().detach(), torch.zeros((gen_c.shape[0], 1), device=self.device)), dim=1)
+        else:
+            gen_c_r = gen_c
+        if phase in ['Greg'] and self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcondg:    
+            with torch.autograd.profiler.record_function('Greg_forward'):    
+                gen_img, gen_ws = self.run_G(gen_z, gen_c_r, transform, slice_range=split)
+                gen_logits = self.D(gen_img, transform)
+                loss_Greg = torch.nn.functional.softplus(gen_logits)
+                loss_Greg = loss_Greg.mean()
+                training_stats.report('Loss/G/loss_Greg', loss_Greg)
+            with torch.autograd.profiler.record_function('Greg_backward'):
+                loss_Greg.mul(gain).backward()
 
         # Gpl: Apply path length regularization.
         if phase in ['Greg', 'Gboth']:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
                 gen_img, gen_ws = self.run_G(gen_z[:batch_size],
-                                             gen_c[:batch_size],
+                                             gen_c_c[:batch_size],
                                              transform[:batch_size], 
                                              slice_range=split[:batch_size])
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
@@ -271,7 +280,7 @@ class StyleGAN2Loss(Loss):
         loss_Dgen = 0
         if phase in ['Dmain', 'Dboth']:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, transform, slice_range=split, update_emas=True)                
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c_c, transform, slice_range=split, update_emas=True)                
                 gen_logits = self.run_D(gen_img, disc_c, blur_sigma=blur_sigma, update_emas=True)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
