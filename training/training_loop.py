@@ -187,8 +187,8 @@ def training_loop(
         if rank == 0:
             print("Using specified img resolution: %d" % img_resolution)
         assert(added_kwargs.img_size == training_set.resolution)
-    num_cdim = training_set.label_dim if not added_kwargs.bcondg else 1
-    num_cdim_d = training_set.label_dim if not added_kwargs.bcond else 4
+    num_cdim = training_set.label_dim + int(added_kwargs.bcondg)
+    num_cdim_d = training_set.label_dim + 4 * int(added_kwargs.bcond) + int(added_kwargs.bcondextra)
     common_kwargs = dict(c_dim=num_cdim, img_resolution=img_resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     if added_kwargs.overrided: # change D img_resolution to be 1/4

@@ -219,6 +219,7 @@ def parse_comma_separated_list(s):
 @click.option('--overrided', help='Override D, location of pkl file', metavar='[PATH|URL]', type=str)
 @click.option('--bcond', help='Use bcond for D', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--bcondg', help='Use bcond for G', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--bcondextra', help='Use domain conditioning on top of the positional conditoning', is_flag=True, default=False)
 def main(**kwargs):
 
     # Initialize config.
@@ -304,6 +305,7 @@ def main(**kwargs):
             bcond = opts.bcond, # Added
             log_imgs = opts.log_imgs, # Added
             bcondg = opts.bcondg, # Added
+            bcondextra = opts.bcondextra, # Added
         )
         if opts.use_hr:
             c.G_kwargs.use_scale_affine = False # TODO:for now disable scaling totally
@@ -362,8 +364,8 @@ def main(**kwargs):
             c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
             c.loss_kwargs.blur_fade_kimg = c.batch_size * 200 / 32 # Fade out the blur during the first N kimg.
 
-    if opts.use_hr and opts.bcondg:
-        c.G_reg_interval = 1 # change the teacher model and student model to use different conditioning
+    # if opts.use_hr and opts.bcondg:
+    #     c.G_reg_interval = 1 # change the teacher model and student model to use different conditioning
 
     # Augmentation.
     if opts.aug != 'noaug':
