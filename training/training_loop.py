@@ -331,7 +331,8 @@ def training_loop(
         if rank == 0:
             phase.start_event = torch.cuda.Event(enable_timing=True)
             phase.end_event = torch.cuda.Event(enable_timing=True)
-
+    if rank == 0:
+        print(f'Existing phases: {[phase.name for phase in phases]}')
     # Export sample images.
     grid_size = None
     grid_z = None
@@ -346,10 +347,11 @@ def training_loop(
             grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
             if not added_kwargs.bcondg:
                 grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
+                grid_c_extra = None
             else: # add to grid_c, 0's, for old domain => append to each grid_c
                 grid_c = torch.from_numpy(labels).to(device)
-                grid_c = torch.cat((grid_c, torch.zeros(grid_c.shape[0], 1).to(device)), dim=1)
-                grid_c = grid_c.split(batch_gpu)
+                grid_c_extra = torch.cat((grid_c, torch.ones(grid_c.shape[0], 1).to(device)), dim=1).split(batch_gpu)
+                grid_c = torch.cat((grid_c, torch.zeros(grid_c.shape[0], 1).to(device)), dim=1).split(batch_gpu)
 
             del images
             if added_kwargs.use_hr:
@@ -464,7 +466,8 @@ def training_loop(
                 continue
             if phase.start_event is not None:
                 phase.start_event.record(torch.cuda.current_stream(device))
-
+            if phase.name == 'none':
+                raise ValueError(f"Phase is None, this should not happen, {phase}, {phase.name}, {phase.interval}")
             # Accumulate gradients.
             phase.opt.zero_grad(set_to_none=True)
             phase.module.requires_grad_(True)
@@ -570,6 +573,9 @@ def training_loop(
                 slice_ranges_4k = patch_util.generate_full_from_patches_slices(high_res, low_res, device=device)
                 images = patch_util.reconstruct_image_from_patches(torch.stack([torch.cat([G_ema(z=z, c=c, noise_mode='const', slice_range=sl.repeat(z.shape[0], 1)).cpu() for z, c in zip(grid_z, grid_c)]) for sl in slice_ranges_4k]))
                 save_image_grid(images, os.path.join(run_dir, f'fakes_hr_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
+                if grid_c_extra:
+                    images = patch_util.reconstruct_image_from_patches(torch.stack([torch.cat([G_ema(z=z, c=c, noise_mode='const', slice_range=sl.repeat(z.shape[0], 1)).cpu() for z, c in zip(grid_z, grid_c_extra)]) for sl in slice_ranges_4k]))
+                    save_image_grid(images, os.path.join(run_dir, f'fakes_hr_extra_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
                 # functional interpolate with bilinear
                 images = F_tv.resize(images, (low_res, low_res), interpolation=InterpolationMode.BILINEAR)
                 save_image_grid(images, os.path.join(run_dir, f'fakes_hrds_{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)    

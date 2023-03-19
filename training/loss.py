@@ -22,7 +22,7 @@ from util.util import grad_with_all_kernels
 #----------------------------------------------------------------------------
 
 class Loss:
-    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, gain, cur_nimg, crops=None): # to be overridden by subclass
+    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, gain, cur_nimg, min_scale, max_scale, split, coords): # to be overridden by subclass
         raise NotImplementedError()
 
 #----------------------------------------------------------------------------
@@ -129,7 +129,7 @@ class StyleGAN2Loss(Loss):
     def accumulate_gradients(self, phase, real_img, real_c, transform, gen_z,
                              gen_c, gain, cur_nimg, min_scale, max_scale, split, coords):
         assert phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
-        if self.pl_weight == 0:
+        if self.pl_weight == 0 and self.added_kwargs.bcondg == False:
             phase = {'Greg': 'none', 'Gboth': 'Gmain'}.get(phase, phase)
         if self.r1_gamma == 0:
             phase = {'Dreg': 'none', 'Dboth': 'Dmain'}.get(phase, phase)
@@ -245,6 +245,7 @@ class StyleGAN2Loss(Loss):
             gen_c_r = torch.cat((gen_c.clone().detach(), torch.zeros((gen_c.shape[0], 1), device=self.device)), dim=1)
         else:
             gen_c_r = gen_c
+        #print(f'Final ={phase in ["Greg"] and self.added_kwargs.teacher_mode == "crop" and self.added_kwargs.bcondg}|{phase=} {self.added_kwargs.teacher_mode=} {self.added_kwargs.bcondg=}')
         if phase in ['Greg'] and self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcondg:    
             with torch.autograd.profiler.record_function('Greg_forward'):
                 teacher_img = self.teacher(gen_z, gen_c_r)    
@@ -271,19 +272,22 @@ class StyleGAN2Loss(Loss):
                 if self.added_kwargs.log_imgs:
                     if v is None and torch.device(f"cuda:0") == self.device:
                         print(f'Printing {curr_val}\n')
-                        torchvision.utils.save_image(teacher_img, f'patches/out_teacher_patch_af_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
-                        torchvision.utils.save_image(gen_img, f'patches/out_fake_patch_af_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
+                        torchvision.utils.save_image(teacher_img, f'patches/reg_out_teacher_patch_af_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
+                        torchvision.utils.save_image(gen_img, f'patches/reg_out_fake_patch_af_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
                 l1_loss = self.loss_l1(gen_img, teacher_img, mask)               
                 lpips_loss = self.loss_lpips(gen_img, teacher_img, mask) 
-                loss_Greg = loss_Greg.mean()
+                teacher_loss = (l1_loss + lpips_loss)[:, None]
+                loss_reg = (loss_Greg + self.added_kwargs.teacher_lambda
+                                  * teacher_loss) 
                 training_stats.report('Loss/G/loss_teacher_l1', l1_loss)
                 training_stats.report('Loss/G/loss_teacher_lpips', lpips_loss)
-                training_stats.report('Loss/G/loss_reg', loss_Greg)
+                training_stats.report('Loss/G/loss_teacher', teacher_loss)
+                training_stats.report('Loss/G/loss_reg', loss_reg)
             with torch.autograd.profiler.record_function('Greg_backward'):
-                loss_Greg.mul(gain).backward()
+                loss_reg.mean().mul(gain).backward()
 
         # Gpl: Apply path length regularization.
-        if phase in ['Greg', 'Gboth']:
+        if phase in ['Greg', 'Gboth'] and self.pl_weight != 0:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
                 gen_img, gen_ws = self.run_G(gen_z[:batch_size],
