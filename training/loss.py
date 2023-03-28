@@ -144,7 +144,8 @@ class StyleGAN2Loss(Loss):
             disc_c = split.clone().detach() / 36 
         else:
             disc_c = gen_c
-
+        if self.added_kwargs.use_hr and self.added_kwargs.bcondg:
+            disc_c = torch.cat((disc_c.clone().detach(), torch.ones((disc_c.shape[0], 1), device=self.device)), dim=1)
         if self.added_kwargs.bcondg:
             # attach, ones to gen_c, NEW DOMAIN
             gen_c_c = torch.cat((gen_c.clone().detach(), torch.ones(gen_c.shape[0], 1).to(self.device)), dim=1)
@@ -170,8 +171,19 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Scale/G/min_scale', min_scale)
                 training_stats.report('Scale/G/max_scale', max_scale)
                 lpips_loss = None
-                if self.teacher is not None and self.added_kwargs.teacher_lambda > 0 and not self.added_kwargs.bcondg:
-                    teacher_img = self.teacher(gen_z, gen_c)
+                if self.added_kwargs.bcondg: # use extra conditioning # rerun the image with different conditioning
+                    gen_img_c = gen_img if not self.added_kwargs.bcondg else self.run_G(gen_z, gen_c_r, transform, slice_range=split)[0]
+                    if self.added_kwargs.adv_original:
+                        gen_logits_c = self.run_D(gen_img_c, disc_c, blur_sigma=blur_sigma) if is_patch_mode and self.added_kwargs.use_grad else self.run_D(gen_img_c, disc_c, blur_sigma=blur_sigma)
+                        #gen_logits_c = self.D(gen_img_c, transform)
+                        loss_Greg_c = torch.nn.functional.softplus(-gen_logits_c)
+                        training_stats.report('Loss/G/loss_G_c', loss_Greg_c)
+                    else:
+                        loss_Greg_c = torch.zeros_like(loss_Gmain, device=self.device)
+                else:
+                    loss_Greg_c = torch.zeros_like(loss_Gmain, device=self.device)
+                if self.teacher is not None and self.added_kwargs.teacher_lambda > 0:
+                    teacher_img = self.teacher(gen_z, gen_c_r)
                     if self.added_kwargs.teacher_mode == 'forward':
                         teacher_crop, teacher_mask = apply_affine_batch(teacher_img, transform)
                         # removes the border around the above mask 
@@ -203,8 +215,6 @@ class StyleGAN2Loss(Loss):
                         # torchvision.utils.save_image(gen_img, 'out_fake_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
                         # torchvision.utils.save_image(teacher_img, 'out_teacher_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
                         
-                        # rerun the image with different conditioning
-                        gen_img_c = gen_img if not self.added_kwargs.bcondg else self.run_G(gen_z, gen_c_r, transform, slice_range=split)[0]
                         if self.added_kwargs.log_imgs:
                             if v is None and torch.device(f"cuda:0") == self.device:
                                 if not os.path.exists('patches'):
@@ -225,8 +235,6 @@ class StyleGAN2Loss(Loss):
                             gen_img = losses.adaptive_downsample256_avg(gen_img_c)
                         else:
                             gen_img = losses.adaptive_downsample256(gen_img_c, mode=self.ds_mode)
-                        # gen_img1 = losses.adaptive_downsample256(gen_img.clone(), mode='nearest')
-                        # gen_img2 = losses.adaptive_downsample256(gen_img.clone(), mode='bilinear')
                         if self.added_kwargs.log_imgs:
                             if v is None and torch.device(f"cuda:0") == self.device:
                                 print(f'Printing {curr_val}\n')
@@ -236,6 +244,7 @@ class StyleGAN2Loss(Loss):
                         lpips_loss = self.loss_lpips(gen_img_c, teacher_img, mask) 
                     else:
                         assert(False)
+                    loss_Gmain = loss_Gmain + loss_Greg_c 
                     if lpips_loss is not None:
                         teacher_loss = (l1_loss + lpips_loss)[:, None]
                         loss_Gmain = (loss_Gmain + self.added_kwargs.teacher_lambda
@@ -326,6 +335,8 @@ class StyleGAN2Loss(Loss):
             disc_real_c = split.clone().detach() / 36 
         else:
             disc_real_c = real_c
+        if self.added_kwargs.use_hr and self.added_kwargs.bcondg:
+            disc_real_c = torch.cat((disc_real_c, torch.zeros((disc_real_c.shape[0], disc_real_c.shape[1] + 1), device=self.device)), dim=1) # add zeroes to the end of the disc_real_c
         # Dmain: Maximize logits for real images.
         # Dr1: Apply R1 regularization.
         if phase in ['Dmain', 'Dreg', 'Dboth']:

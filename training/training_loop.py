@@ -188,7 +188,9 @@ def training_loop(
             print("Using specified img resolution: %d" % img_resolution)
         assert(added_kwargs.img_size == training_set.resolution)
     num_cdim = training_set.label_dim + int(added_kwargs.bcondg)
-    num_cdim_d = training_set.label_dim + 4 * int(added_kwargs.bcond) + int(added_kwargs.bcondextra)
+    num_cdim_d = training_set.label_dim + 4 * int(added_kwargs.bcond) + int(added_kwargs.bcondg)
+    if rank == 0:
+        print("num_cdim: %d, num_cdim_d: %d" % (num_cdim, num_cdim_d))
     common_kwargs = dict(c_dim=num_cdim, img_resolution=img_resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     if added_kwargs.overrided: # change D img_resolution to be 1/4
@@ -202,8 +204,9 @@ def training_loop(
     if added_kwargs.use_hr and added_kwargs.use_teached_layers:
         reset_value_dict = dnnlib.EasyDict()
         for layer_name in added_kwargs.use_teached_layers:
-            reset_value_dict[layer_name] = teacher.state_dict()[layer_name]
-
+            reset_value_dict[layer_name] = teacher.state_dict()[layer_name] #.clone().detach().requires_grad_(False)
+        #common_kwargs['c_dim'] = training_set.label_dim # added to remove unnecessary conditioning of teacher model, if it doesn't need it
+        #teacher = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device)
     if added_kwargs.use_hr == True and 'patch' in training_mode:
         common_kwargs_4k = dict(c_dim=num_cdim, actual_resolution=img_resolution, img_resolution=added_kwargs.actual_resolution, img_channels=training_set.num_channels)
         if rank == 0:
@@ -260,8 +263,9 @@ def training_loop(
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False, allow_ignore_different_shapes=added_kwargs.use_hr)
     # Print network summary tables.
     if rank == 0:
-        z = torch.empty([batch_gpu, G.z_dim], device=device)
-        c = torch.empty([batch_gpu, G.c_dim], device=device)
+        print_batch = 1 # batch_gpu
+        z = torch.empty([print_batch, G.z_dim], device=device)
+        c = torch.empty([print_batch, G.c_dim], device=device)
         print('--- Teacher ---')
         img = misc.print_module_summary(teacher, [z, c])
         print('--- Discriminator ---')
@@ -269,7 +273,7 @@ def training_loop(
             # Downsample images, just for printing
             from torch.nn import functional as F
             img = F.interpolate(img, size=(img_resolution // 4, img_resolution // 4), mode='bilinear', align_corners=False)
-        cd = torch.empty([batch_gpu, D.c_dim], device=device)
+        cd = torch.empty([print_batch, D.c_dim], device=device)
         misc.print_module_summary(D, [img, cd])
         del img
         torch.cuda.empty_cache()
@@ -459,7 +463,7 @@ def training_loop(
             all_gen_c = [training_set.get_label(np.random.randint(len(training_set))) for _ in range(len(phases) * batch_size)]
             all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
             all_gen_c = [phase_gen_c.split(batch_gpu) for phase_gen_c in all_gen_c.split(batch_size)]
-                        
+        torch.cuda.empty_cache()                
         # Execute training phases.
         for phase, phase_gen_z, phase_gen_c in zip(phases, all_gen_z, all_gen_c):
             if batch_idx % phase.interval != 0:
@@ -472,6 +476,7 @@ def training_loop(
             phase.opt.zero_grad(set_to_none=True)
             phase.module.requires_grad_(True)
             for transform, real_img, real_c, gen_z, gen_c, curr_split, curr_coords in zip(phase_transform, phase_real_img, phase_real_c, phase_gen_z, phase_gen_c, split_range, coords):
+                # print(f'{phase.name}:{real_c.shape}:{gen_z.shape}:{gen_c.shape}')
                 loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, transform=transform,
                                           gen_z=gen_z, gen_c=gen_c, gain=phase.interval, cur_nimg=cur_nimg,
                                           min_scale=min_scale, max_scale=max_scale, split=curr_split, coords=curr_coords)

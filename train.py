@@ -220,6 +220,7 @@ def parse_comma_separated_list(s):
 @click.option('--bcond', help='Use bcond for D', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--bcondg', help='Use bcond for G', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--bcondextra', help='Use domain conditioning on top of the positional conditoning', is_flag=True, default=False)
+@click.option('--adv_original', help='To use adv training on top', is_flag=True, default=False)
 def main(**kwargs):
 
     # Initialize config.
@@ -306,6 +307,7 @@ def main(**kwargs):
             log_imgs = opts.log_imgs, # Added
             bcondg = opts.bcondg, # Added
             bcondextra = opts.bcondextra, # Added
+            adv_original = opts.adv_original, # Added
         )
         if opts.use_hr:
             c.G_kwargs.use_scale_affine = False # TODO:for now disable scaling totally

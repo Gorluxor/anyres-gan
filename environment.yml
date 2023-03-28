@@ -18,6 +18,8 @@ dependencies:
   - ipython
   - pillow
   - ipywidgets=7.6.5
+  - mamba
+  - einops
   - pip:
      - lpips
      - ninja
