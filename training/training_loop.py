@@ -433,9 +433,12 @@ def training_loop(
                     phase_real_img = (data['image'].to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
                     phase_real_c = phase_real_c.to(device).split(batch_gpu)
                     if added_kwargs.log_imgs:
-                        for iw, curr_img in enumerate(phase_real_img):
-                            if not os.path.exists(f'patches_f/{iw}_{cur_tick}.jpg'):
-                                torchvision.utils.save_image(curr_img, f'patches_f/{iw}_{cur_tick}.jpg', range=(-1, 1), normalize=True, nrow=4)
+                        # add folder if it doesn't exist
+                        if not os.path.exists(os.path.join(run_dir, 'patches')):
+                            os.makedirs(os.path.join(run_dir, 'patches'))                       
+                        # for iw, curr_img in enumerate(phase_real_img):
+                        #     if not os.path.exists(os.path.join(run_dir, f'patches/{iw}_{cur_tick}.jpg')):
+                        #         torchvision.utils.save_image(curr_img, os.path.join(run_dir, f'patches/{iw}_{cur_tick}.jpg'), range=(-1, 1), normalize=True, nrow=4)
                     phase_transform = data['params']['transform'].to(device).split(batch_gpu)
                     if added_kwargs.use_hr:
                         split_range_data = torch.stack(data['params']['split_range']).permute(1,0).to(device)
@@ -479,7 +482,7 @@ def training_loop(
                 # print(f'{phase.name}:{real_c.shape}:{gen_z.shape}:{gen_c.shape}')
                 loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_c=real_c, transform=transform,
                                           gen_z=gen_z, gen_c=gen_c, gain=phase.interval, cur_nimg=cur_nimg,
-                                          min_scale=min_scale, max_scale=max_scale, split=curr_split, coords=curr_coords)
+                                          min_scale=min_scale, max_scale=max_scale, split=curr_split, coords=curr_coords, run_dir=run_dir)
             phase.module.requires_grad_(False)
             if added_kwargs.use_grad_clip:
                 torch.nn.utils.clip_grad_norm_(phase.module.parameters(), 1.0)
@@ -545,6 +548,7 @@ def training_loop(
         fields += [f'G/loss {stats_collector["Loss/G/loss"]:<3.2f}']
         teacher_loss = stats_collector["Loss/G/loss_teacher_l1"] + stats_collector["Loss/G/loss_teacher_lpips"]
         fields += [f'G/loss_teacher {teacher_loss:<3.2f}']
+        fields += [f'G/loss_G_c {stats_collector["Loss/G/loss_G_c"]:<3.2f}']
         fields += [f'D/loss {stats_collector["Loss/D/loss"]:<3.2f}']
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))
