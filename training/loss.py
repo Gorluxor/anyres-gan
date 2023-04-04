@@ -293,11 +293,12 @@ class StyleGAN2Loss(Loss):
                 loss_Dgen.mean().mul(gain).backward()
 
         if self.added_kwargs.use_hr and self.added_kwargs.bcond:
-            disc_real_c = split.clone().detach() / 36 
+            if self.added_kwargs.bcondd:  
+                disc_real_c = torch.cat((real_c, split.clone().detach() / 36, torch.zeros((disc_c.shape[0], 1), device=self.device)), dim=1)
+            else:
+                disc_real_c = torch.cat((real_c, split.clone().detach() / 36), dim=1)  
         else:
             disc_real_c = real_c
-        if self.added_kwargs.use_hr and self.added_kwargs.bcondd:
-            disc_real_c = torch.cat((disc_real_c, torch.zeros((disc_real_c.shape[0], disc_real_c.shape[1] + 1), device=self.device)), dim=1) # add zeroes to the end of the disc_real_c
         # Dmain: Maximize logits for real images.
         # Dr1: Apply R1 regularization.
         if phase in ['Dmain', 'Dreg', 'Dboth']:
