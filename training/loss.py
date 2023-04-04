@@ -140,12 +140,12 @@ class StyleGAN2Loss(Loss):
         v = self.logged_nimg.get(str(curr_val), None)
         self.logged_nimg[str(curr_val)] = True
         # Gmain: Maximize logits for generated images.
+        disc_c = gen_c
         if self.added_kwargs.use_hr and self.added_kwargs.bcond:
-            disc_c = split.clone().detach() / 36 
-        else:
-            disc_c = gen_c
-        if self.added_kwargs.use_hr and self.added_kwargs.bcondg:
-            disc_c = torch.cat((disc_c.clone().detach(), torch.ones((disc_c.shape[0], 1), device=self.device)), dim=1)
+            if self.added_kwargs.bcondd:  
+                disc_c = torch.cat((disc_c, split.clone().detach() / 36, torch.ones((disc_c.shape[0], 1), device=self.device)), dim=1)
+            else:
+                disc_c = torch.cat((disc_c, split.clone().detach() / 36), dim=1)    
         if self.added_kwargs.bcondg:
             # attach, ones to gen_c, NEW DOMAIN
             gen_c_c = torch.cat((gen_c.clone().detach(), torch.ones(gen_c.shape[0], 1).to(self.device)), dim=1)
@@ -159,10 +159,10 @@ class StyleGAN2Loss(Loss):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c_c, transform, slice_range=split) # Added crops
                 # vutils.save_image(gen_img, 'out_fake_patch.png', range=(-1, 1),
                 #                   normalize=True, nrow=4)
-                if self.added_kwargs.log_imgs and curr_val < 20 or curr_val % 100 == 0:
+                if self.added_kwargs.log_imgs and (curr_val < 20 or curr_val % 100 == 0):
                     if v is None and torch.device(f"cuda:0") == self.device:
                         torchvision.utils.save_image(real_img, os.path.join(run_dir, f'patches/real_img_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
-                        torchvision.utils.save_image(gen_img, os.path.join(run_dir, f'patches/out_fake_patch_bf_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
+                        torchvision.utils.save_image(gen_img, os.path.join(run_dir, f'patches/fake_patch_original_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
                 gen_logits = self.run_D(grad_with_all_kernels(gen_img), disc_c, blur_sigma=blur_sigma) if is_patch_mode and self.added_kwargs.use_grad else self.run_D(gen_img, disc_c, blur_sigma=blur_sigma)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
@@ -209,18 +209,11 @@ class StyleGAN2Loss(Loss):
                                                        mode='nearest')
                         )
                     elif self.added_kwargs.teacher_mode == 'crop':
-                        # teacher_crop, teacher_mask = apply_affine_batch(teacher_img, transform)
-                        # crop here is the same
-                        # torchvision.utils.save_image(real_img, "out_real_img.png", range=(-1, 1), normalize=True, nrow=4)
-                        # torchvision.utils.save_image(teacher_crop, 'apply_affine_tc.png', range=(-1, 1), normalize=True, nrow=4)
-                        # torchvision.utils.save_image(gen_img, 'out_fake_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
-                        # torchvision.utils.save_image(teacher_img, 'out_teacher_patch_bf.png', range=(-1, 1), normalize=True, nrow=4)
-                        
                         if self.added_kwargs.log_imgs and curr_val < 20 or curr_val % 100 == 0:
                             if v is None and torch.device(f"cuda:0") == self.device:
                                 if not os.path.exists(os.path.join(run_dir, 'patches')):
                                     os.makedirs(os.path.join(run_dir,'patches'))
-                                torchvision.utils.save_image(teacher_img, os.path.join(run_dir, f'patches/out_teacher_patch_bf_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
+                                torchvision.utils.save_image(teacher_img, os.path.join(run_dir, f'patches/teacher_patch_before_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
 
                         should_crop = True if coords is not None and coords[0] is not None else False
                         if should_crop:
@@ -233,13 +226,13 @@ class StyleGAN2Loss(Loss):
                         # torch.ones_like for B x 1 x H x W
                         mask = torch.ones_like(teacher_img[:, :1, :, :])
                         if self.ds_mode == 'average':
-                            gen_img = losses.adaptive_downsample256_avg(gen_img_c)
+                            gen_img_c = losses.adaptive_downsample256_avg(gen_img_c)
                         else:
-                            gen_img = losses.adaptive_downsample256(gen_img_c, mode=self.ds_mode)
-                        if self.added_kwargs.log_imgs and curr_val < 20 or curr_val % 100 == 0:
+                            gen_img_c = losses.adaptive_downsample256(gen_img_c, mode=self.ds_mode)
+                        if self.added_kwargs.log_imgs and curr_val < 20 or curr_val % 100 == 0 and self.added_kwargs.bcondg:
                             if v is None and torch.device(f"cuda:0") == self.device:
-                                torchvision.utils.save_image(teacher_img, os.path.join(run_dir, f'patches/out_teacher_patch_af_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
-                                torchvision.utils.save_image(gen_img, os.path.join(run_dir, f'patches/out_fake_patch_af_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
+                                torchvision.utils.save_image(teacher_img, os.path.join(run_dir, f'patches/teacher_patch_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
+                                torchvision.utils.save_image(gen_img_c, os.path.join(run_dir, f'patches/fake_patch_cond_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
 
                                 # log crop values into a file
                                 with open(os.path.join(run_dir, 'crop_values.txt'), 'a') as f:
@@ -265,46 +258,6 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 loss_Gmain.mean().mul(gain).backward()
         
-        #print(f'Final ={phase in ["Greg"] and self.added_kwargs.teacher_mode == "crop" and self.added_kwargs.bcondg}|{phase=} {self.added_kwargs.teacher_mode=} {self.added_kwargs.bcondg=}')
-        # if phase in ['Greg'] and self.added_kwargs.teacher_mode == 'crop' and self.added_kwargs.bcondg:    
-        #     with torch.autograd.profiler.record_function('Greg_forward'):
-        #         teacher_img = self.teacher(gen_z, gen_c_r)    
-        #         gen_img, gen_ws = self.run_G(gen_z, gen_c_r, transform, slice_range=split)
-        #         gen_logits = self.D(gen_img, transform)
-        #         loss_Greg = torch.nn.functional.softplus(gen_logits)
-                
-        #         should_crop = True if coords is not None and coords[0] is not None else False
-        #         if should_crop:
-        #             teacher_img = patch_util.pil_crop_on_tensors(teacher_img, coords, r=True)
-        #         else: 
-        #             if self.ds_mode == 'average':
-        #                 teacher_img = losses.adaptive_downsample256_avg(teacher_img)
-        #             else:
-        #                 teacher_img = losses.adaptive_downsample256(teacher_img, mode=self.ds_mode)
-        #         # torch.ones_like for B x 1 x H x W
-        #         mask = torch.ones_like(teacher_img[:, :1, :, :])
-        #         if self.ds_mode == 'average':
-        #             gen_img = losses.adaptive_downsample256_avg(gen_img)
-        #         else:
-        #             gen_img = losses.adaptive_downsample256(gen_img, mode=self.ds_mode)
-        #         # gen_img1 = losses.adaptive_downsample256(gen_img.clone(), mode='nearest')
-        #         # gen_img2 = losses.adaptive_downsample256(gen_img.clone(), mode='bilinear')
-        #         if self.added_kwargs.log_imgs:
-        #             if v is None and torch.device(f"cuda:0") == self.device:
-        #                 print(f'Printing {curr_val}\n')
-        #                 torchvision.utils.save_image(teacher_img, f'patches/reg_out_teacher_patch_af_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
-        #                 torchvision.utils.save_image(gen_img, f'patches/reg_out_fake_patch_af_{curr_val}.jpg', range=(-1, 1), normalize=True, nrow=4)
-        #         l1_loss = self.loss_l1(gen_img, teacher_img, mask)               
-        #         lpips_loss = self.loss_lpips(gen_img, teacher_img, mask) 
-        #         teacher_loss = (l1_loss + lpips_loss)[:, None]
-        #         loss_reg = (loss_Greg + self.added_kwargs.teacher_lambda
-        #                           * teacher_loss) 
-        #         training_stats.report('Loss/G/loss_teacher_l1', l1_loss)
-        #         training_stats.report('Loss/G/loss_teacher_lpips', lpips_loss)
-        #         training_stats.report('Loss/G/loss_teacher', teacher_loss)
-        #         training_stats.report('Loss/G/loss_reg', loss_reg)
-        #     with torch.autograd.profiler.record_function('Greg_backward'):
-        #         loss_reg.mean().mul(gain).backward()
 
         # Gpl: Apply path length regularization.
         if phase in ['Greg', 'Gboth'] and self.pl_weight != 0:
@@ -343,7 +296,7 @@ class StyleGAN2Loss(Loss):
             disc_real_c = split.clone().detach() / 36 
         else:
             disc_real_c = real_c
-        if self.added_kwargs.use_hr and self.added_kwargs.bcondg:
+        if self.added_kwargs.use_hr and self.added_kwargs.bcondd:
             disc_real_c = torch.cat((disc_real_c, torch.zeros((disc_real_c.shape[0], disc_real_c.shape[1] + 1), device=self.device)), dim=1) # add zeroes to the end of the disc_real_c
         # Dmain: Maximize logits for real images.
         # Dr1: Apply R1 regularization.

@@ -188,7 +188,7 @@ def training_loop(
             print("Using specified img resolution: %d" % img_resolution)
         assert(added_kwargs.img_size == training_set.resolution)
     num_cdim = training_set.label_dim + int(added_kwargs.bcondg)
-    num_cdim_d = training_set.label_dim + 4 * int(added_kwargs.bcond) + int(added_kwargs.bcondg)
+    num_cdim_d = training_set.label_dim + 4 * int(added_kwargs.bcond) + int(added_kwargs.bcondd)
     if rank == 0:
         print("num_cdim: %d, num_cdim_d: %d" % (num_cdim, num_cdim_d))
     common_kwargs = dict(c_dim=num_cdim, img_resolution=img_resolution, img_channels=training_set.num_channels)

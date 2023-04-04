@@ -217,8 +217,9 @@ def parse_comma_separated_list(s):
 @click.option('--freezeg', help='Freeze first layers of G', metavar='INT', type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--deltag', help='Delta G', metavar='FLOAT', type=click.IntRange(min=0), default=0.0, show_default=True)
 @click.option('--overrided', help='Override D, location of pkl file', metavar='[PATH|URL]', type=str)
-@click.option('--bcond', help='Use bcond for D', metavar='BOOL', type=bool, default=False, show_default=True)
-@click.option('--bcondg', help='Use bcond for G', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--bcond', help='Use bcond for D (positional, slice information)', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--bcondg', help='Use domain bcond for G', metavar='BOOL', type=bool, default=False, show_default=True)
+@click.option('--bcondd', help='Use domain bcond for D', metavar='BOOL', type=bool, default=False, show_default=True)
 @click.option('--bcondextra', help='Use domain conditioning on top of the positional conditoning', is_flag=True, default=False)
 @click.option('--adv_original', help='To use adv training on top', is_flag=True, default=False)
 @click.option('--adv_lambda', help='adv loss weight', metavar='FLOAT', type=click.FloatRange(min=0), default=1.0, show_default=True)
@@ -307,6 +308,7 @@ def main(**kwargs):
             bcond = opts.bcond, # Added
             log_imgs = opts.log_imgs, # Added
             bcondg = opts.bcondg, # Added
+            bcondd = opts.bcondd, # Added
             bcondextra = opts.bcondextra, # Added
             adv_original = opts.adv_original, # Added
             adv_lambda = opts.adv_lambda, # Added
