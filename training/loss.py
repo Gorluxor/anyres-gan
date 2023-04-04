@@ -213,7 +213,7 @@ class StyleGAN2Loss(Loss):
                             if v is None and torch.device(f"cuda:0") == self.device:
                                 if not os.path.exists(os.path.join(run_dir, 'patches')):
                                     os.makedirs(os.path.join(run_dir,'patches'))
-                                torchvision.utils.save_image(teacher_img, os.path.join(run_dir, f'patches/teacher_patch_before_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
+                                # torchvision.utils.save_image(teacher_img, os.path.join(run_dir, f'patches/teacher_patch_before_{curr_val}.jpg'), range=(-1, 1), normalize=True, nrow=4)
 
                         should_crop = True if coords is not None and coords[0] is not None else False
                         if should_crop:
