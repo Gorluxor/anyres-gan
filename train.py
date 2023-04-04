@@ -402,9 +402,11 @@ def main(**kwargs):
         c.cudnn_benchmark = False
 
     # Description string.
+    extra_str0 = "" if opts.adv_original else f"--L{opts.adv_lambda:.1f}"
     extra_str1 = 'D' if opts.bcond else ''
     extra_str2 = 'G' if opts.bcondg else ''
-    extra_str = f'{extra_str1}{extra_str2}'
+    extra_str3 = '+' if opts.bcondd else ''
+    extra_str = f'{extra_str1}{extra_str2}{extra_str3}{extra_str0}'
     desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-gamma{c.loss_kwargs.r1_gamma:g}--teacher{opts.teacher_lambda:.1f}{extra_str}'
     if opts.desc is not None:
         desc += f'-{opts.desc}'
