@@ -388,6 +388,13 @@ def training_loop(
         print()
     if rank == 0:
         print(f"Model:{str(G)}")
+    if rank == 0: # print git diff into git_diff.txt
+        import subprocess
+        diff_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+        print(f"git diff: {diff_hash}")
+        diff_output = subprocess.check_output(['git', 'diff'])
+        with open(os.path.join(run_dir, 'git_diff.txt'), 'w') as f:
+            f.write(diff_output.decode('utf-8'))
     cur_nimg = resume_kimg * 1000
     cur_tick = 0
     tick_start_nimg = cur_nimg
@@ -432,10 +439,10 @@ def training_loop(
                     data, phase_real_c = next(patch_dset_iterator)
                     phase_real_img = (data['image'].to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
                     phase_real_c = phase_real_c.to(device).split(batch_gpu)
-                    if added_kwargs.log_imgs:
+                    if added_kwargs.log_imgs and rank == 0:
                         # add folder if it doesn't exist
                         if not os.path.exists(os.path.join(run_dir, 'patches')):
-                            os.makedirs(os.path.join(run_dir, 'patches'))                       
+                            os.makedirs(os.path.join(run_dir, 'patches'), exist_ok=True)                       
                         # for iw, curr_img in enumerate(phase_real_img):
                         #     if not os.path.exists(os.path.join(run_dir, f'patches/{iw}_{cur_tick}.jpg')):
                         #         torchvision.utils.save_image(curr_img, os.path.join(run_dir, f'patches/{iw}_{cur_tick}.jpg'), range=(-1, 1), normalize=True, nrow=4)
