@@ -141,11 +141,14 @@ class StyleGAN2Loss(Loss):
         self.logged_nimg[str(curr_val)] = True
         # Gmain: Maximize logits for generated images.
         disc_c = gen_c
-        if self.added_kwargs.use_hr and self.added_kwargs.bcond:
-            if self.added_kwargs.bcondd:  
+        if self.added_kwargs.use_hr:
+            # Simplified the nested if-else conditions using elif
+            if self.added_kwargs.bcond and self.added_kwargs.bcondd:
                 disc_c = torch.cat((disc_c, split.clone().detach() / 36, torch.ones((disc_c.shape[0], 1), device=self.device)), dim=1)
-            else:
+            elif self.added_kwargs.bcond:
                 disc_c = torch.cat((disc_c, split.clone().detach() / 36), dim=1)    
+            elif self.added_kwargs.bcondd:
+                disc_c = torch.cat((disc_c, torch.ones((disc_c.shape[0], 1), device=self.device)), dim=1)
         if self.added_kwargs.bcondg:
             # attach, ones to gen_c, NEW DOMAIN
             gen_c_c = torch.cat((gen_c.clone().detach(), torch.ones(gen_c.shape[0], 1).to(self.device)), dim=1)
@@ -292,11 +295,13 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Dgen_backward'):
                 loss_Dgen.mean().mul(gain).backward()
 
-        if self.added_kwargs.use_hr and self.added_kwargs.bcond:
-            if self.added_kwargs.bcondd:  
+        if self.added_kwargs.use_hr:
+            if self.added_kwargs.bcondd and self.added_kwargs.bcond:  
                 disc_real_c = torch.cat((real_c, split.clone().detach() / 36, torch.zeros((disc_c.shape[0], 1), device=self.device)), dim=1)
-            else:
-                disc_real_c = torch.cat((real_c, split.clone().detach() / 36), dim=1)  
+            elif self.added_kwargs.bcond:
+                disc_real_c = torch.cat((real_c, split.clone().detach() / 36), dim=1)
+            elif self.added_kwargs.bcondd:
+                disc_real_c = torch.cat((real_c, torch.zeros((disc_c.shape[0], 1), device=self.device)), dim=1)
         else:
             disc_real_c = real_c
         # Dmain: Maximize logits for real images.
