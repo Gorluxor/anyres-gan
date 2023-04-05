@@ -302,6 +302,8 @@ class StyleGAN2Loss(Loss):
                 disc_real_c = torch.cat((real_c, split.clone().detach() / 36), dim=1)
             elif self.added_kwargs.bcondd:
                 disc_real_c = torch.cat((real_c, torch.zeros((disc_c.shape[0], 1), device=self.device)), dim=1)
+            else: # self.added_kwargs.bcondg only
+                disc_real_c = real_c
         else:
             disc_real_c = real_c
         # Dmain: Maximize logits for real images.
